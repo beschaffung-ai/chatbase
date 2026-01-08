@@ -76,26 +76,31 @@ st.title("🤖 Chatbot Conversation Analysis")
 tab1, tab2, tab3, tab4 = st.tabs(["📊 Überblick", "💬 Themen & Inhalte", "🧠 Qualität & Sentiment", "📂 Daten-Explorer"])
 
 with tab1:
-    st.header("Deskriptive Statistik")
+    st.header("Deskriptive Statistik", help="Allgemeine Kennzahlen zum Nachrichtenaufkommen.")
     stats = filtered_analyzer.get_basic_stats()
     
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Konversationen", stats['total_conversations'])
-    col2.metric("Nachrichten", stats['total_messages'])
-    col3.metric("Ø Dauer (sek)", stats['avg_duration_seconds'])
-    col4.metric("Ø Msgs/Conv", stats['avg_messages_per_conversation'])
+    col1.metric("Konversationen", stats['total_conversations'], help="Anzahl der geführten Gespräche im gewählten Zeitraum.")
+    col2.metric("Nachrichten", stats['total_messages'], help="Gesamtzahl aller ausgetauschten Nachrichten (User + Bot).")
+    col3.metric("Ø Dauer (sek)", stats['avg_duration_seconds'], help="Durchschnittliche Zeit zwischen erster und letzter Nachricht.")
+    col4.metric("Ø Msgs/Conv", stats['avg_messages_per_conversation'], help="Wie viele Nachrichten werden durchschnittlich pro Gespräch ausgetauscht?")
     
     st.divider()
     
     # Timeline
-    st.subheader("Entwicklung über Zeit")
-    daily_counts = filtered_analyzer.get_time_distribution(freq='D')
-    fig_timeline = px.line(daily_counts, x='date', y='count', title='Tägliche Konversationen', markers=True)
+    st.subheader("Entwicklung über Zeit", help="Zeigt, an welchen Tagen wie viele Gespräche stattgefunden haben.")
+    
+    # Toggle für Aggregation
+    time_agg = st.radio("Zeitraum-Aggregation:", ["Täglich", "Wöchentlich"], horizontal=True)
+    freq = 'D' if time_agg == "Täglich" else 'W'
+    
+    time_counts = filtered_analyzer.get_time_distribution(freq=freq)
+    fig_timeline = px.line(time_counts, x='date', y='count', title=f'{time_agg}e Konversationen', markers=True)
     fig_timeline.update_layout(xaxis_title="Datum", yaxis_title="Anzahl")
     st.plotly_chart(fig_timeline, use_container_width=True)
     
     # Heatmap (Weekday x Hour)
-    st.subheader("Support-Auslastung (Heatmap)")
+    st.subheader("Support-Auslastung (Heatmap)", help="Dunkle Felder zeigen Zeiten mit hoher Aktivität. Ideal für die Personalplanung.")
     heatmap_data = filtered_analyzer.get_heatmap_data()
     if not heatmap_data.empty:
         fig_heatmap = px.imshow(heatmap_data, 
@@ -117,12 +122,25 @@ with tab1:
         st.plotly_chart(fig_source, use_container_width=True)
 
 with tab2:
-    st.header("Themen & Inhalte")
+    st.header("Themen & Inhalte", help="Analyse, worüber die Nutzer sprechen und wie Gespräche verlaufen.")
+    
+    # Erste Fragen Analyse
+    st.subheader("Häufigste Einstiegsfragen", help="Womit starten die Nutzer das Gespräch? Zeigt die Hauptanliegen.")
+    first_questions = filtered_analyzer.get_first_questions(top_k=10)
+    if not first_questions.empty:
+        fig_first_q = px.bar(first_questions, x='Anzahl', y='Frage', orientation='h', 
+                            title='Top 10 erste User-Nachrichten')
+        fig_first_q.update_layout(yaxis={'categoryorder':'total ascending'})
+        st.plotly_chart(fig_first_q, use_container_width=True)
+    else:
+        st.info("Keine Daten für Einstiegsfragen verfügbar.")
+    
+    st.divider()
     
     col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader("Häufigste Phrasen (Bigrams)")
+        st.subheader("Häufigste Phrasen (Bigrams)", help="Häufige Wortpaare (z.B. 'Konto eröffnen').")
         top_phrases = filtered_analyzer.get_top_phrases(n_gram_range=(2,2), top_k=10)
         if top_phrases:
             df_phrases = pd.DataFrame(top_phrases, columns=['Phrase', 'Count'])
@@ -133,7 +151,7 @@ with tab2:
             st.info("Keine Daten für Phrasen verfügbar.")
 
     with col2:
-        st.subheader("Häufigste Phrasen (Trigrams)")
+        st.subheader("Häufigste Phrasen (Trigrams)", help="Häufige Wort-Trios (z.B. 'wie viel kostet').")
         top_trigrams = filtered_analyzer.get_top_phrases(n_gram_range=(3,3), top_k=10)
         if top_trigrams:
             df_tri = pd.DataFrame(top_trigrams, columns=['Phrase', 'Count'])
@@ -145,30 +163,43 @@ with tab2:
             
     st.divider()
     
-    st.subheader("Topic Clustering")
-    if st.button("Start Topic Modeling"):
-        with st.spinner("Analysiere Themen..."):
-            clustered_df, cluster_terms = filtered_analyzer.perform_topic_modeling(n_clusters=5)
-            
-            # Show stats per cluster
-            cluster_stats = clustered_df.groupby('cluster').agg({
-                'conversation_id': 'count',
-                'duration_seconds': 'mean'
-            }).reset_index()
-            cluster_stats['Topic Terms'] = cluster_stats['cluster'].map(cluster_terms)
-            
-            st.dataframe(cluster_stats.style.format({'duration_seconds': '{:.1f}'}))
-            
-            # Visualize
-            fig_cluster = px.bar(cluster_stats, x='cluster', y='conversation_id', 
-                                 hover_data=['Topic Terms'], 
-                                 title='Konversationen pro Cluster',
-                                 labels={'conversation_id': 'Anzahl', 'cluster': 'Cluster ID'})
-            st.plotly_chart(fig_cluster, use_container_width=True)
+    st.subheader("Topic Clustering", help="Versucht, Gespräche automatisch in Themengruppen zu sortieren (Machine Learning).")
+    
+    # Session State initialisieren
+    if 'cluster_data' not in st.session_state:
+        st.session_state.cluster_data = None
+
+    if st.button("Start Topic Modeling") or st.session_state.cluster_data is not None:
+        
+        # Nur neu berechnen, wenn noch keine Daten da sind oder Button gedrückt wurde
+        if st.session_state.cluster_data is None:
+            with st.spinner("Analysiere Themen..."):
+                clustered_df, cluster_terms = filtered_analyzer.perform_topic_modeling(n_clusters=5)
+                # Ergebnis speichern
+                st.session_state.cluster_data = (clustered_df, cluster_terms)
+        
+        # Daten aus State laden
+        clustered_df, cluster_terms = st.session_state.cluster_data
+        
+        # Show stats per cluster
+        cluster_stats = clustered_df.groupby('cluster').agg({
+            'conversation_id': 'count',
+            'duration_seconds': 'mean'
+        }).reset_index()
+        cluster_stats['Topic Terms'] = cluster_stats['cluster'].map(cluster_terms)
+        
+        st.dataframe(cluster_stats.style.format({'duration_seconds': '{:.1f}'}))
+        
+        # Visualize
+        fig_cluster = px.bar(cluster_stats, x='cluster', y='conversation_id', 
+                             hover_data=['Topic Terms'], 
+                             title='Konversationen pro Cluster',
+                             labels={'conversation_id': 'Anzahl', 'cluster': 'Cluster ID'})
+        st.plotly_chart(fig_cluster, use_container_width=True)
             
     st.divider()
     
-    st.subheader("Word Cloud")
+    st.subheader("Word Cloud", help="Visuelle Darstellung der häufigsten Wörter. Je größer, desto öfter genannt.")
     # We can't display matplotlib easily in some envs, but Streamlit supports it.
     from wordcloud import WordCloud
     import matplotlib.pyplot as plt
@@ -186,7 +217,7 @@ with tab2:
         st.info("Nicht genügend Text für Wordcloud.")
 
     st.divider()
-    st.subheader("Exit-Analyse (Wie enden Gespräche?)")
+    st.subheader("Exit-Analyse (Wie enden Gespräche?)", help="Zeigt, ob der Nutzer (offen?) oder der Bot (geklärt?) das letzte Wort hatte.")
     
     exit_df = filtered_analyzer.get_exit_analysis()
     
@@ -205,7 +236,7 @@ with tab2:
     st.dataframe(bot_exits)
 
 with tab3:
-    st.header("Qualitäts-Analyse")
+    st.header("Qualitäts-Analyse", help="Metriken zur Zufriedenheit und Komplexität der Anfragen.")
     
     if st.button("Sentiment-Analyse durchführen"):
         with st.spinner("Berechne Sentiment..."):
@@ -223,7 +254,7 @@ with tab3:
             st.write("Skala: -1 (Negativ) bis +1 (Positiv)")
 
     st.divider()
-    st.subheader("Komplexitäts-Verteilung (Nachrichtenanzahl)")
+    st.subheader("Komplexitäts-Verteilung (Nachrichtenanzahl)", help="Zeigt, wie viele Chats kurz (Quick Fix) oder lang (komplex) sind.")
     
     # Message Count Distribution
     fig_msg_dist = px.histogram(filtered_conv_df, x='message_count', nbins=30, 
@@ -243,6 +274,35 @@ with tab3:
     
     fig_class = px.pie(class_counts, values='Anzahl', names='Klasse', title='Klassifizierung nach Länge')
     st.plotly_chart(fig_class, use_container_width=True)
+
+    st.divider()
+    st.subheader("Bot-Hilflosigkeit", help="Wie oft signalisiert der Bot, dass er nicht helfen kann? (z.B. 'Ich weiß nicht', 'Support kontaktieren')")
+    
+    helpless_data = filtered_analyzer.get_bot_helplessness()
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Hilflose Antworten", helpless_data['helpless_count'])
+    col2.metric("Gesamt Bot-Nachrichten", helpless_data['total_bot_messages'])
+    col3.metric("Hilflosigkeits-Rate", f"{helpless_data['helpless_rate']}%", 
+                help="Prozentsatz der Bot-Antworten, die auf Wissenslücken hindeuten.")
+    
+    if not helpless_data['examples'].empty:
+        st.markdown("**Beispiele für 'hilflose' Antworten:**")
+        st.dataframe(helpless_data['examples'])
+
+    st.divider()
+    st.subheader("Bot-Antwortlängen", help="Wie lang sind die Antworten des Bots im Durchschnitt?")
+    
+    length_stats, length_df = filtered_analyzer.get_response_length_stats()
+    
+    col1, col2 = st.columns(2)
+    col1.metric("Ø Zeichen pro Antwort", length_stats['avg_chars'])
+    col2.metric("Ø Wörter pro Antwort", length_stats['avg_words'])
+    
+    fig_length = px.histogram(length_df, x='word_count', nbins=30, 
+                             title='Verteilung der Antwortlänge (Wörter)',
+                             labels={'word_count': 'Wörter pro Antwort'})
+    st.plotly_chart(fig_length, use_container_width=True)
 
 with tab4:
     st.header("Daten-Explorer")

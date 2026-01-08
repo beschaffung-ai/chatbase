@@ -163,3 +163,74 @@ class ChatAnalyzer:
     def get_wordcloud_text(self) -> str:
         """Returns a single string of all user text for wordcloud"""
         return " ".join(self.user_msgs['content'].dropna().tolist())
+
+    def get_first_questions(self, top_k=15) -> pd.DataFrame:
+        """
+        Extracts the first user message from each conversation.
+        Returns the most common first questions.
+        """
+        # Get first user message per conversation
+        first_user_msgs = self.user_msgs.sort_values('conversation_id').groupby('conversation_id').first().reset_index()
+        
+        # Count most common first messages
+        first_q_counts = first_user_msgs['content'].value_counts().head(top_k).reset_index()
+        first_q_counts.columns = ['Frage', 'Anzahl']
+        
+        return first_q_counts
+
+    def get_bot_helplessness(self) -> Dict:
+        """
+        Detects bot messages that indicate inability to help.
+        Returns statistics and example messages.
+        """
+        bot_msgs = self.msg_df[self.msg_df['role'] == 'assistant'].copy()
+        
+        # Keywords that indicate the bot doesn't know or refers to support
+        helpless_keywords = [
+            'weiß ich nicht', 'kann ich nicht', 'keine information',
+            'support kontaktieren', 'kundenservice', 'rufen sie an',
+            'leider nicht', 'tut mir leid', 'nicht möglich',
+            'wende dich an', 'kontaktiere', 'hilfe vom team'
+        ]
+        
+        # Check which messages contain helpless keywords
+        def contains_helpless(text):
+            if pd.isna(text):
+                return False
+            text_lower = text.lower()
+            return any(kw in text_lower for kw in helpless_keywords)
+        
+        bot_msgs['is_helpless'] = bot_msgs['content'].apply(contains_helpless)
+        
+        helpless_count = bot_msgs['is_helpless'].sum()
+        total_bot_msgs = len(bot_msgs)
+        helpless_rate = (helpless_count / total_bot_msgs * 100) if total_bot_msgs > 0 else 0
+        
+        # Get example helpless messages
+        helpless_examples = bot_msgs[bot_msgs['is_helpless']]['content'].value_counts().head(5).reset_index()
+        helpless_examples.columns = ['Nachricht', 'Anzahl']
+        
+        return {
+            'helpless_count': int(helpless_count),
+            'total_bot_messages': int(total_bot_msgs),
+            'helpless_rate': round(helpless_rate, 2),
+            'examples': helpless_examples
+        }
+
+    def get_response_length_stats(self) -> pd.DataFrame:
+        """
+        Analyzes the length of bot responses.
+        Returns statistics about response lengths.
+        """
+        bot_msgs = self.msg_df[self.msg_df['role'] == 'assistant'].copy()
+        bot_msgs['char_count'] = bot_msgs['content'].str.len()
+        bot_msgs['word_count'] = bot_msgs['content'].str.split().str.len()
+        
+        stats = {
+            'avg_chars': round(bot_msgs['char_count'].mean(), 1),
+            'avg_words': round(bot_msgs['word_count'].mean(), 1),
+            'min_chars': int(bot_msgs['char_count'].min()),
+            'max_chars': int(bot_msgs['char_count'].max())
+        }
+        
+        return stats, bot_msgs[['char_count', 'word_count']]
