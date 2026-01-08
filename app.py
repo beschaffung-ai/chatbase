@@ -23,7 +23,8 @@ st.markdown("""
 st.sidebar.title("Chatbase Analytics")
 
 # File Selection
-uploaded_file = st.sidebar.file_uploader("Upload Chat Log (CSV)", type="csv")
+uploaded_file = st.sidebar.file_uploader("Upload Chat Log (CSV)", type="csv", 
+                                         help="Lade hier deinen Chatbase-Export hoch (CSV-Format).")
 
 analyzer = None
 
@@ -39,14 +40,14 @@ if not analyzer or analyzer.conv_df.empty:
     st.stop()
 
 # Data Filters
-st.sidebar.header("Filter")
+st.sidebar.header("Filter", help="Grenze die Analyse auf einen bestimmten Zeitraum ein.")
 
 # Date Filter
 min_date = analyzer.conv_df['date'].min()
 max_date = analyzer.conv_df['date'].max()
 
-start_date = st.sidebar.date_input("Start Date", min_date)
-end_date = st.sidebar.date_input("End Date", max_date)
+start_date = st.sidebar.date_input("Start Date", min_date, help="Analysiere ab diesem Datum.")
+end_date = st.sidebar.date_input("End Date", max_date, help="Analysiere bis zu diesem Datum.")
 
 # Filter Logic
 mask = (analyzer.conv_df['date'].dt.date >= start_date) & (analyzer.conv_df['date'].dt.date <= end_date)
@@ -91,7 +92,8 @@ with tab1:
     st.subheader("Entwicklung über Zeit", help="Zeigt, an welchen Tagen wie viele Gespräche stattgefunden haben.")
     
     # Toggle für Aggregation
-    time_agg = st.radio("Zeitraum-Aggregation:", ["Täglich", "Wöchentlich"], horizontal=True)
+    time_agg = st.radio("Zeitraum-Aggregation:", ["Täglich", "Wöchentlich"], horizontal=True,
+                        help="Wähle, ob du die Daten pro Tag oder pro Woche sehen möchtest.")
     freq = 'D' if time_agg == "Täglich" else 'W'
     
     time_counts = filtered_analyzer.get_time_distribution(freq=freq)
@@ -108,14 +110,15 @@ with tab1:
                                x=heatmap_data.columns,
                                y=heatmap_data.index,
                                title="Konversationen nach Zeit & Tag",
-                               aspect="auto")
+                               aspect="auto",
+                               color_continuous_scale="YlOrRd")  # Gelb (wenig) -> Orange -> Rot (viel)
         st.plotly_chart(fig_heatmap, use_container_width=True)
     else:
         st.info("Zu wenig Daten für Heatmap.")
 
     # Source Distribution if available
     if 'source' in filtered_conv_df.columns and filtered_conv_df['source'].nunique() > 1:
-        st.subheader("Quellen")
+        st.subheader("Quellen", help="Woher kommen die Konversationen? (z.B. Widget, API, etc.)")
         source_counts = filtered_conv_df['source'].value_counts().reset_index()
         source_counts.columns = ['source', 'count']
         fig_source = px.pie(source_counts, values='count', names='source', title='Verteilung nach Quelle')
@@ -163,19 +166,21 @@ with tab2:
             
     st.divider()
     
-    st.subheader("Topic Clustering", help="Versucht, Gespräche automatisch in Themengruppen zu sortieren (Machine Learning).")
+    st.subheader("Topic Clustering", help="Gruppiert Gespräche automatisch in Themencluster mittels Machine Learning (K-Means).")
     
-    # Session State initialisieren
-    if 'cluster_data' not in st.session_state:
-        st.session_state.cluster_data = None
-
-    if st.button("Start Topic Modeling") or st.session_state.cluster_data is not None:
+    # Toggle statt Button (verhindert Tab-Wechsel)
+    run_clustering = st.toggle("Topic Clustering aktivieren", value=False,
+                               help="Schalte ein, um die Themen-Analyse zu starten. Die Berechnung kann einige Sekunden dauern.")
+    
+    if run_clustering:
+        # Session State initialisieren
+        if 'cluster_data' not in st.session_state:
+            st.session_state.cluster_data = None
         
-        # Nur neu berechnen, wenn noch keine Daten da sind oder Button gedrückt wurde
+        # Nur neu berechnen, wenn noch keine Daten da sind
         if st.session_state.cluster_data is None:
             with st.spinner("Analysiere Themen..."):
                 clustered_df, cluster_terms = filtered_analyzer.perform_topic_modeling(n_clusters=5)
-                # Ergebnis speichern
                 st.session_state.cluster_data = (clustered_df, cluster_terms)
         
         # Daten aus State laden
@@ -238,20 +243,49 @@ with tab2:
 with tab3:
     st.header("Qualitäts-Analyse", help="Metriken zur Zufriedenheit und Komplexität der Anfragen.")
     
-    if st.button("Sentiment-Analyse durchführen"):
-        with st.spinner("Berechne Sentiment..."):
-            sentiment_df = filtered_analyzer.analyze_sentiment()
-            
-            # Histogram
-            fig_hist = px.histogram(sentiment_df, x='sentiment', nbins=20, title='Sentiment-Verteilung (Polarity)')
-            st.plotly_chart(fig_hist, use_container_width=True)
-            
-            # Scatter Duration vs Sentiment
-            fig_scatter = px.scatter(sentiment_df, x='duration_seconds', y='sentiment', 
-                                     title='Dauer vs. Sentiment', opacity=0.5)
-            st.plotly_chart(fig_scatter, use_container_width=True)
-            
-            st.write("Skala: -1 (Negativ) bis +1 (Positiv)")
+    st.subheader("Sentiment-Analyse", help="Analysiert die Stimmung der User-Nachrichten anhand positiver/negativer Keywords und Emojis.")
+    
+    # Session State für Sentiment
+    if 'sentiment_data' not in st.session_state:
+        st.session_state.sentiment_data = None
+    
+    # Toggle statt Button
+    run_sentiment = st.toggle("Sentiment-Analyse aktivieren", value=False, 
+                              help="Schalte ein, um die Stimmungsanalyse zu berechnen.")
+    
+    if run_sentiment:
+        if st.session_state.sentiment_data is None:
+            with st.spinner("Berechne Sentiment..."):
+                st.session_state.sentiment_data = filtered_analyzer.analyze_sentiment()
+        
+        sentiment_df = st.session_state.sentiment_data
+        
+        # Erklärung der Skala
+        st.markdown("""
+        **So funktioniert die Sentiment-Analyse:**
+        - Wir suchen nach **positiven Wörtern** (z.B. "danke", "super", "toll", 👍, 😊)
+        - Wir suchen nach **negativen Wörtern** (z.B. "problem", "fehler", "geht nicht", 😞, 😡)
+        - **Score:** -1 = nur negativ, 0 = neutral/gemischt, +1 = nur positiv
+        """)
+        
+        st.divider()
+        
+        # Histogram mit Erklärung
+        st.markdown("**📊 Grafik 1: Wie ist die Stimmung verteilt?**")
+        st.caption("Jeder Balken zeigt, wie viele Konversationen einen bestimmten Sentiment-Wert haben. Balken links = unzufrieden, Balken rechts = zufrieden, Balken in der Mitte = neutral.")
+        fig_hist = px.histogram(sentiment_df, x='sentiment', nbins=20, title='Sentiment-Verteilung')
+        fig_hist.update_layout(xaxis_title="Sentiment-Score (-1 bis +1)", yaxis_title="Anzahl Konversationen")
+        st.plotly_chart(fig_hist, use_container_width=True)
+        
+        st.divider()
+        
+        # Scatter mit Erklärung
+        st.markdown("**📈 Grafik 2: Hängt die Gesprächsdauer mit der Stimmung zusammen?**")
+        st.caption("Jeder Punkt = eine Konversation. X-Achse = Dauer in Sekunden, Y-Achse = Sentiment. Muster erkennen: Sind lange Gespräche eher negativ?")
+        fig_scatter = px.scatter(sentiment_df, x='duration_seconds', y='sentiment', 
+                                 title='Gesprächsdauer vs. Stimmung', opacity=0.5)
+        fig_scatter.update_layout(xaxis_title="Dauer (Sekunden)", yaxis_title="Sentiment-Score")
+        st.plotly_chart(fig_scatter, use_container_width=True)
 
     st.divider()
     st.subheader("Komplexitäts-Verteilung (Nachrichtenanzahl)", help="Zeigt, wie viele Chats kurz (Quick Fix) oder lang (komplex) sind.")
@@ -281,23 +315,34 @@ with tab3:
     helpless_data = filtered_analyzer.get_bot_helplessness()
     
     col1, col2, col3 = st.columns(3)
-    col1.metric("Hilflose Antworten", helpless_data['helpless_count'])
-    col2.metric("Gesamt Bot-Nachrichten", helpless_data['total_bot_messages'])
+    col1.metric("Hilflose Antworten", helpless_data['helpless_count'], help="Anzahl der Bot-Antworten mit Hilflosigkeits-Keywords.")
+    col2.metric("Gesamt Bot-Nachrichten", helpless_data['total_bot_messages'], help="Gesamtzahl aller Bot-Antworten.")
     col3.metric("Hilflosigkeits-Rate", f"{helpless_data['helpless_rate']}%", 
                 help="Prozentsatz der Bot-Antworten, die auf Wissenslücken hindeuten.")
     
     if not helpless_data['examples'].empty:
-        st.markdown("**Beispiele für 'hilflose' Antworten:**")
+        st.markdown("**Top 5 'hilflose' Antworten:**")
         st.dataframe(helpless_data['examples'])
+        
+        # CSV Download für alle hilflosen Antworten
+        if not helpless_data['all_helpless'].empty:
+            csv = helpless_data['all_helpless'].to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Alle hilflosen Antworten als CSV herunterladen",
+                data=csv,
+                file_name="hilflose_antworten.csv",
+                mime="text/csv",
+                help="Lädt alle als 'hilflos' erkannten Bot-Antworten herunter."
+            )
 
     st.divider()
-    st.subheader("Bot-Antwortlängen", help="Wie lang sind die Antworten des Bots im Durchschnitt?")
+    st.subheader("Bot-Antwortlängen", help="Wie lang sind die Antworten des Bots im Durchschnitt? Zu kurz = nicht hilfreich, zu lang = verwirrend.")
     
     length_stats, length_df = filtered_analyzer.get_response_length_stats()
     
     col1, col2 = st.columns(2)
-    col1.metric("Ø Zeichen pro Antwort", length_stats['avg_chars'])
-    col2.metric("Ø Wörter pro Antwort", length_stats['avg_words'])
+    col1.metric("Ø Zeichen pro Antwort", length_stats['avg_chars'], help="Durchschnittliche Zeichenanzahl pro Bot-Nachricht.")
+    col2.metric("Ø Wörter pro Antwort", length_stats['avg_words'], help="Durchschnittliche Wortanzahl pro Bot-Nachricht.")
     
     fig_length = px.histogram(length_df, x='word_count', nbins=30, 
                              title='Verteilung der Antwortlänge (Wörter)',
@@ -305,8 +350,8 @@ with tab3:
     st.plotly_chart(fig_length, use_container_width=True)
 
 with tab4:
-    st.header("Daten-Explorer")
-    search_term = st.text_input("Suche in Nachrichten")
+    st.header("Daten-Explorer", help="Durchsuche alle Nachrichten und Konversationen.")
+    search_term = st.text_input("Suche in Nachrichten", help="Gib ein Suchwort ein, um alle passenden Nachrichten zu finden.")
     
     if search_term:
         results = filtered_msg_df[filtered_msg_df['content'].str.contains(search_term, case=False, na=False)]
