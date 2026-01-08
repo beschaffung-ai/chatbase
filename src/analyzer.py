@@ -2,7 +2,6 @@ import pandas as pd
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
 from sklearn.cluster import KMeans
-from textblob_de import TextBlobDE
 import nltk
 from nltk.corpus import stopwords
 import re
@@ -139,14 +138,44 @@ class ChatAnalyzer:
             return self.conv_df, {0: "Insufficient Data"}
 
     def analyze_sentiment(self) -> pd.DataFrame:
-        """Adds sentiment polarity to user messages and averages it per conversation"""
-        def get_sentiment(text):
-            try:
-                return TextBlobDE(text).sentiment.polarity
-            except:
+        """
+        Adds sentiment polarity to user messages using keyword-based analysis.
+        Better suited for German chat messages than TextBlobDE.
+        """
+        # Positive and negative German keywords commonly used in chats
+        positive_words = [
+            'danke', 'super', 'toll', 'klasse', 'perfekt', 'wunderbar', 'genial', 
+            'top', 'prima', 'ausgezeichnet', 'fantastisch', 'großartig', 'hilfreich',
+            'freundlich', 'gut', 'gerne', 'freue', 'zufrieden', 'glücklich', 'dankeschön',
+            'lieb', 'nett', 'cool', 'mega', 'hammer', 'spitze', 'beste', 'optimal',
+            '👍', '😊', '🙂', '😀', '❤️', '🎉', '👏', '✅', '💪', '😃'
+        ]
+        
+        negative_words = [
+            'schlecht', 'leider', 'problem', 'fehler', 'ärgerlich', 'frustrierend',
+            'enttäuscht', 'unzufrieden', 'schlimm', 'furchtbar', 'schrecklich', 
+            'nervig', 'langsam', 'kompliziert', 'verwirrend', 'schwierig', 'teuer',
+            'nicht funktioniert', 'geht nicht', 'klappt nicht', 'verstehe nicht',
+            'hilft nicht', 'immer noch', 'schon wieder', 'trotzdem', 'leider nicht',
+            '😞', '😠', '😡', '👎', '😢', '😤', '🙁', '😕'
+        ]
+        
+        def calculate_sentiment(text):
+            if pd.isna(text):
                 return 0.0
+            text_lower = text.lower()
+            
+            pos_count = sum(1 for word in positive_words if word in text_lower)
+            neg_count = sum(1 for word in negative_words if word in text_lower)
+            
+            total = pos_count + neg_count
+            if total == 0:
+                return 0.0
+            
+            # Score from -1 to +1
+            return (pos_count - neg_count) / total
 
-        self.user_msgs['sentiment'] = self.user_msgs['content'].apply(get_sentiment)
+        self.user_msgs['sentiment'] = self.user_msgs['content'].apply(calculate_sentiment)
         
         # Average per conversation
         avg_sentiment = self.user_msgs.groupby('conversation_id')['sentiment'].mean().reset_index()
@@ -181,7 +210,7 @@ class ChatAnalyzer:
     def get_bot_helplessness(self) -> Dict:
         """
         Detects bot messages that indicate inability to help.
-        Returns statistics and example messages.
+        Returns statistics, examples, and full list of helpless messages.
         """
         bot_msgs = self.msg_df[self.msg_df['role'] == 'assistant'].copy()
         
@@ -206,15 +235,20 @@ class ChatAnalyzer:
         total_bot_msgs = len(bot_msgs)
         helpless_rate = (helpless_count / total_bot_msgs * 100) if total_bot_msgs > 0 else 0
         
-        # Get example helpless messages
+        # Get example helpless messages (top 5)
         helpless_examples = bot_msgs[bot_msgs['is_helpless']]['content'].value_counts().head(5).reset_index()
         helpless_examples.columns = ['Nachricht', 'Anzahl']
+        
+        # Get ALL helpless messages for download
+        all_helpless = bot_msgs[bot_msgs['is_helpless']][['conversation_id', 'content']].copy()
+        all_helpless.columns = ['Conversation ID', 'Nachricht']
         
         return {
             'helpless_count': int(helpless_count),
             'total_bot_messages': int(total_bot_msgs),
             'helpless_rate': round(helpless_rate, 2),
-            'examples': helpless_examples
+            'examples': helpless_examples,
+            'all_helpless': all_helpless
         }
 
     def get_response_length_stats(self) -> pd.DataFrame:

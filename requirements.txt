@@ -4,7 +4,5 @@ wordcloud
 pandas
 numpy
 scikit-learn
-textblob-de
 nltk
 matplotlib
-textblob<0.18.0
