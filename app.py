@@ -23,19 +23,16 @@ st.markdown("""
 st.sidebar.title("Chatbase Analytics")
 
 # File Selection
-default_file = "chats_BErjZYVjS1TBgb3431XYY_2025-01-08~2026-01-08.csv"
 uploaded_file = st.sidebar.file_uploader("Upload Chat Log (CSV)", type="csv")
 
 analyzer = None
 
 if uploaded_file:
     analyzer = load_data(uploaded_file=uploaded_file)
-elif os.path.exists(default_file):
-    st.sidebar.info(f"Using default file: {default_file}")
-    analyzer = load_data(file_path=default_file)
 else:
-    st.warning("Please upload a CSV file to begin.")
+    st.info("👋 Willkommen! Bitte lade eine Chatbase-CSV-Datei hoch, um die Analyse zu starten.")
     st.stop()
+
 
 if not analyzer or analyzer.conv_df.empty:
     st.error("Could not parse data or data is empty.")
