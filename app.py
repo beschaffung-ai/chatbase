@@ -8,6 +8,50 @@ import os
 # Page Config
 st.set_page_config(page_title="Chatbase Analytics", layout="wide", initial_sidebar_state="expanded")
 
+# ==================== PASSWORD AUTHENTICATION ====================
+def check_password():
+    """Returns `True` if the user has entered correct credentials."""
+    
+    # Return True if already logged in
+    if st.session_state.get("password_correct", False):
+        return True
+
+    # Show login form
+    st.markdown("### 🔐 Login erforderlich")
+    st.markdown("Diese App ist passwortgeschützt.")
+    
+    # Use session state to store input values
+    if "login_username" not in st.session_state:
+        st.session_state.login_username = ""
+    if "login_password" not in st.session_state:
+        st.session_state.login_password = ""
+    
+    username = st.text_input("Username", key="login_username")
+    password = st.text_input("Passwort", type="password", key="login_password")
+    
+    if st.button("Anmelden"):
+        try:
+            if (username in st.secrets["passwords"] and 
+                st.secrets["passwords"][username] == password):
+                st.session_state["password_correct"] = True
+                st.session_state["current_user"] = username
+                # Clear login fields
+                del st.session_state.login_username
+                del st.session_state.login_password
+                st.rerun()
+            else:
+                st.error("😕 Falscher Username oder Passwort")
+        except Exception as e:
+            st.error(f"😕 Fehler: Secrets nicht konfiguriert. Erstelle .streamlit/secrets.toml")
+    
+    return False
+
+# Check authentication
+if not check_password():
+    st.stop()
+
+# ==================== END AUTHENTICATION ====================
+
 # Custom CSS for Dark Mode adjustments if needed (Streamlit handles most)
 st.markdown("""
 <style>
@@ -21,6 +65,7 @@ st.markdown("""
 
 # Sidebar
 st.sidebar.title("Chatbase Analytics")
+st.sidebar.caption(f"Angemeldet als: {st.session_state.get('current_user', 'Unknown')}")
 
 # File Selection
 uploaded_file = st.sidebar.file_uploader("Upload Chat Log (CSV)", type="csv", 
@@ -49,6 +94,206 @@ max_date = analyzer.conv_df['date'].max()
 start_date = st.sidebar.date_input("Start Date", min_date, help="Analysiere ab diesem Datum.")
 end_date = st.sidebar.date_input("End Date", max_date, help="Analysiere bis zu diesem Datum.")
 
+# HTML Export Section
+st.sidebar.divider()
+st.sidebar.header("📥 Export", help="Exportiere die Analyse-Ergebnisse als HTML-Datei.")
+
+def generate_html_report(analyzer_obj, start_d, end_d):
+    """Generates a comprehensive HTML report with all KPIs and charts."""
+    stats = analyzer_obj.get_basic_stats()
+    success = analyzer_obj.calculate_success_rate()
+    helpless = analyzer_obj.get_bot_helplessness()
+    time_dist = analyzer_obj.get_time_distribution(freq='W')
+    first_qs = analyzer_obj.get_first_questions(top_k=10)
+    top_bigrams = analyzer_obj.get_top_phrases(n_gram_range=(2,2), top_k=10)
+    
+    # Create charts
+    fig_timeline = px.line(time_dist, x='date', y='count', title='Wöchentliche Konversationen', markers=True)
+    fig_timeline.update_layout(xaxis_title="Datum", yaxis_title="Anzahl")
+    
+    outcome_df = pd.DataFrame({
+        'Outcome': ['Erfolg', 'Neutral', 'Misserfolg'],
+        'Count': [success['success_count'], success['neutral_count'], success['failure_count']]
+    })
+    fig_success = px.pie(outcome_df, values='Count', names='Outcome', title='Gesprächs-Outcomes',
+                         color='Outcome', color_discrete_map={'Erfolg': '#2ECC71', 'Neutral': '#95A5A6', 'Misserfolg': '#E74C3C'})
+    
+    if top_bigrams:
+        df_bigrams = pd.DataFrame(top_bigrams, columns=['Phrase', 'Count'])
+        fig_bigrams = px.bar(df_bigrams, x='Count', y='Phrase', orientation='h', title='Top 10 Bigrams')
+        fig_bigrams.update_layout(yaxis={'categoryorder':'total ascending'})
+        bigrams_html = fig_bigrams.to_html(full_html=False, include_plotlyjs=False)
+    else:
+        bigrams_html = "<p>Keine Daten für Bigrams.</p>"
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="de">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Chatbase Analytics Report</title>
+        <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+        <style>
+            body {{
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                background-color: #1a1a2e;
+                color: #eaeaea;
+                margin: 0;
+                padding: 20px;
+            }}
+            .container {{
+                max-width: 1200px;
+                margin: 0 auto;
+            }}
+            h1, h2 {{
+                color: #00d4ff;
+            }}
+            .kpi-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 20px;
+                margin: 20px 0;
+            }}
+            .kpi-card {{
+                background: #16213e;
+                border-radius: 10px;
+                padding: 20px;
+                text-align: center;
+            }}
+            .kpi-value {{
+                font-size: 2em;
+                font-weight: bold;
+                color: #00d4ff;
+            }}
+            .kpi-label {{
+                color: #888;
+                margin-top: 5px;
+            }}
+            .chart-container {{
+                background: #16213e;
+                border-radius: 10px;
+                padding: 20px;
+                margin: 20px 0;
+            }}
+            .section {{
+                margin: 40px 0;
+            }}
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+                margin: 20px 0;
+            }}
+            th, td {{
+                padding: 12px;
+                text-align: left;
+                border-bottom: 1px solid #333;
+            }}
+            th {{
+                background: #0f3460;
+            }}
+            .success {{ color: #2ECC71; }}
+            .neutral {{ color: #95A5A6; }}
+            .failure {{ color: #E74C3C; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>📊 Chatbase Analytics Report</h1>
+            <p>Zeitraum: {start_d} bis {end_d}</p>
+            
+            <div class="section">
+                <h2>📈 Übersicht</h2>
+                <div class="kpi-grid">
+                    <div class="kpi-card">
+                        <div class="kpi-value">{stats['total_conversations']}</div>
+                        <div class="kpi-label">Konversationen</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-value">{stats['total_messages']}</div>
+                        <div class="kpi-label">Nachrichten</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-value">{stats['avg_duration_seconds']}s</div>
+                        <div class="kpi-label">Ø Dauer</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-value">{stats['avg_messages_per_conversation']}</div>
+                        <div class="kpi-label">Ø Msgs/Conv</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="section">
+                <h2>✅ Erfolgsrate</h2>
+                <div class="kpi-grid">
+                    <div class="kpi-card">
+                        <div class="kpi-value success">{success['success_count']}</div>
+                        <div class="kpi-label">Erfolg</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-value neutral">{success['neutral_count']}</div>
+                        <div class="kpi-label">Neutral</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-value failure">{success['failure_count']}</div>
+                        <div class="kpi-label">Misserfolg</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-value">{success['success_rate']}%</div>
+                        <div class="kpi-label">Erfolgsquote</div>
+                    </div>
+                </div>
+                <div class="chart-container">
+                    {fig_success.to_html(full_html=False, include_plotlyjs=False)}
+                </div>
+            </div>
+            
+            <div class="section">
+                <h2>📅 Zeitlicher Verlauf</h2>
+                <div class="chart-container">
+                    {fig_timeline.to_html(full_html=False, include_plotlyjs=False)}
+                </div>
+            </div>
+            
+            <div class="section">
+                <h2>🤖 Bot-Qualität</h2>
+                <div class="kpi-grid">
+                    <div class="kpi-card">
+                        <div class="kpi-value">{helpless['helpless_count']}</div>
+                        <div class="kpi-label">Hilflose Antworten</div>
+                    </div>
+                    <div class="kpi-card">
+                        <div class="kpi-value">{helpless['helpless_rate']}%</div>
+                        <div class="kpi-label">Hilflosigkeits-Rate</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="section">
+                <h2>💬 Top Phrasen</h2>
+                <div class="chart-container">
+                    {bigrams_html}
+                </div>
+            </div>
+            
+            <div class="section">
+                <h2>❓ Häufigste Einstiegsfragen</h2>
+                <table>
+                    <tr><th>Frage</th><th>Anzahl</th></tr>
+                    {"".join(f"<tr><td>{row['Frage'][:100]}...</td><td>{row['Anzahl']}</td></tr>" for _, row in first_qs.iterrows()) if not first_qs.empty else "<tr><td colspan='2'>Keine Daten</td></tr>"}
+                </table>
+            </div>
+            
+            <footer style="margin-top: 40px; padding: 20px; border-top: 1px solid #333; color: #666;">
+                <p>Generiert mit Chatbase Analytics</p>
+            </footer>
+        </div>
+    </body>
+    </html>
+    """
+    return html
+
 # Filter Logic
 mask = (analyzer.conv_df['date'].dt.date >= start_date) & (analyzer.conv_df['date'].dt.date <= end_date)
 filtered_conv_df = analyzer.conv_df.loc[mask]
@@ -70,6 +315,17 @@ try:
     filtered_analyzer = ChatAnalyzer(filtered_conv_df, filtered_msg_df)
 except Exception as e:
     st.error(f"Error filtering data: {e}")
+
+# Export Button (now that filtered_analyzer is defined)
+if st.sidebar.button("📄 HTML-Report generieren", help="Erstellt einen vollständigen Report als HTML-Datei zum Download."):
+    with st.spinner("Generiere Report..."):
+        html_report = generate_html_report(filtered_analyzer, start_date, end_date)
+        st.sidebar.download_button(
+            label="⬇️ HTML herunterladen",
+            data=html_report,
+            file_name=f"chatbase_report_{start_date}_{end_date}.html",
+            mime="text/html"
+        )
 
 # Layout
 st.title("🤖 Chatbot Conversation Analysis")
@@ -127,6 +383,29 @@ with tab1:
 with tab2:
     st.header("Themen & Inhalte", help="Analyse, worüber die Nutzer sprechen und wie Gespräche verlaufen.")
     
+    # Keyword Trends über Zeit
+    st.subheader("Themen-Trend über Zeit", help="Zeigt, welche Keywords pro Woche/Monat am häufigsten genannt werden. Ideal um Trends und saisonale Themen zu erkennen.")
+    
+    trend_freq = st.radio("Trend-Aggregation:", ["Wöchentlich", "Monatlich"], horizontal=True,
+                          help="Wähle, ob du die Keywords pro Woche oder pro Monat sehen möchtest.", key="trend_freq")
+    trend_top_k = st.slider("Anzahl Top-Keywords:", 5, 15, 10, 
+                            help="Wie viele der häufigsten Keywords sollen angezeigt werden?")
+    
+    freq_map = {'Wöchentlich': 'W', 'Monatlich': 'M'}
+    trend_data = filtered_analyzer.get_keyword_trends(freq=freq_map[trend_freq], top_k=trend_top_k)
+    
+    if not trend_data.empty:
+        fig_trend = px.line(trend_data, x='period', y='count', color='keyword',
+                           title=f'Top {trend_top_k} Keywords im Zeitverlauf ({trend_freq})',
+                           labels={'period': 'Zeitraum', 'count': 'Häufigkeit', 'keyword': 'Keyword'},
+                           markers=True)
+        fig_trend.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+        st.plotly_chart(fig_trend, use_container_width=True)
+    else:
+        st.info("Nicht genügend Daten für Trend-Analyse.")
+    
+    st.divider()
+    
     # Erste Fragen Analyse
     st.subheader("Häufigste Einstiegsfragen", help="Womit starten die Nutzer das Gespräch? Zeigt die Hauptanliegen.")
     first_questions = filtered_analyzer.get_first_questions(top_k=10)
@@ -166,41 +445,125 @@ with tab2:
             
     st.divider()
     
-    st.subheader("Topic Clustering", help="Gruppiert Gespräche automatisch in Themencluster mittels Machine Learning (K-Means).")
+    st.subheader("Topic Clustering", help="Gruppiert Gespräche automatisch in Themencluster.")
     
-    # Toggle statt Button (verhindert Tab-Wechsel)
-    run_clustering = st.toggle("Topic Clustering aktivieren", value=False,
-                               help="Schalte ein, um die Themen-Analyse zu starten. Die Berechnung kann einige Sekunden dauern.")
+    # Auswahl der Methode
+    clustering_method = st.radio(
+        "Clustering-Methode:",
+        ["K-Means (Lokal)", "🤖 AI-Analyse (OpenAI GPT)"],
+        horizontal=True,
+        help="K-Means ist kostenlos aber weniger genau. AI-Analyse nutzt OpenAI GPT für bessere semantische Erkennung (API-Kosten)."
+    )
     
-    if run_clustering:
-        # Session State initialisieren
-        if 'cluster_data' not in st.session_state:
-            st.session_state.cluster_data = None
+    if clustering_method == "K-Means (Lokal)":
+        run_clustering = st.toggle("K-Means Clustering aktivieren", value=False,
+                                   help="Schalte ein, um die Themen-Analyse zu starten.")
         
-        # Nur neu berechnen, wenn noch keine Daten da sind
-        if st.session_state.cluster_data is None:
-            with st.spinner("Analysiere Themen..."):
-                clustered_df, cluster_terms = filtered_analyzer.perform_topic_modeling(n_clusters=5)
-                st.session_state.cluster_data = (clustered_df, cluster_terms)
+        if run_clustering:
+            if 'cluster_data' not in st.session_state:
+                st.session_state.cluster_data = None
+            
+            if st.session_state.cluster_data is None:
+                with st.spinner("Analysiere Themen mit K-Means..."):
+                    clustered_df, cluster_terms = filtered_analyzer.perform_topic_modeling(n_clusters=5)
+                    st.session_state.cluster_data = (clustered_df, cluster_terms)
+            
+            clustered_df, cluster_terms = st.session_state.cluster_data
+            
+            cluster_stats = clustered_df.groupby('cluster').agg({
+                'conversation_id': 'count',
+                'duration_seconds': 'mean'
+            }).reset_index()
+            cluster_stats['Topic Terms'] = cluster_stats['cluster'].map(cluster_terms)
+            
+            st.dataframe(cluster_stats.style.format({'duration_seconds': '{:.1f}'}))
+            
+            fig_cluster = px.bar(cluster_stats, x='cluster', y='conversation_id', 
+                                 hover_data=['Topic Terms'], 
+                                 title='Konversationen pro Cluster',
+                                 labels={'conversation_id': 'Anzahl', 'cluster': 'Cluster ID'})
+            st.plotly_chart(fig_cluster, use_container_width=True)
+    
+    else:  # AI-Analyse
+        st.info("🤖 **AI-Analyse** nutzt OpenAI GPT für präzise Themenerkennung. Stratifizierte Stichprobe aus bis zu 300 Konversationen für repräsentative Ergebnisse.")
         
-        # Daten aus State laden
-        clustered_df, cluster_terms = st.session_state.cluster_data
+        # Model selection
+        ai_model = st.selectbox(
+            "OpenAI Model:",
+            ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
+            index=0,
+            help="gpt-4o: Beste Qualität | gpt-4o-mini: Günstig & schnell | gpt-4-turbo: Großes Context Window"
+        )
         
-        # Show stats per cluster
-        cluster_stats = clustered_df.groupby('cluster').agg({
-            'conversation_id': 'count',
-            'duration_seconds': 'mean'
-        }).reset_index()
-        cluster_stats['Topic Terms'] = cluster_stats['cluster'].map(cluster_terms)
+        run_ai_clustering = st.toggle("AI Topic-Analyse starten", value=False,
+                                      help="Startet die OpenAI-basierte Themenanalyse. Benötigt konfigurierten API-Key in Streamlit Secrets.")
         
-        st.dataframe(cluster_stats.style.format({'duration_seconds': '{:.1f}'}))
-        
-        # Visualize
-        fig_cluster = px.bar(cluster_stats, x='cluster', y='conversation_id', 
-                             hover_data=['Topic Terms'], 
-                             title='Konversationen pro Cluster',
-                             labels={'conversation_id': 'Anzahl', 'cluster': 'Cluster ID'})
-        st.plotly_chart(fig_cluster, use_container_width=True)
+        if run_ai_clustering:
+            if 'ai_topics' not in st.session_state:
+                st.session_state.ai_topics = None
+            
+            if st.session_state.ai_topics is None:
+                with st.spinner(f"🤖 Analysiere Themen mit {ai_model}... (Dies kann 30-60 Sekunden dauern)"):
+                    result = filtered_analyzer.perform_ai_topic_modeling(sample_size=500, model=ai_model)
+                    st.session_state.ai_topics = result
+            
+            result = st.session_state.ai_topics
+            
+            if "error" in result:
+                st.error(f"❌ Fehler: {result['error']}")
+                st.info("💡 **Tipp:** Stelle sicher, dass der OpenAI API-Key in Streamlit Secrets konfiguriert ist:\n\n```toml\n[openai]\napi_key = \"sk-...\"\n```")
+            else:
+                # Success metrics
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Analysiert", f"{result.get('conversations_analyzed', 0)} Konversationen")
+                col2.metric("Abdeckung", f"{result.get('sample_coverage', 0)}%")
+                col3.metric("Model", result.get('model_used', 'GPT'))
+                
+                st.caption(f"Sampling: {result.get('sampling_method', 'random')}")
+                
+                # Summary
+                if "summary" in result:
+                    st.markdown(f"### 📝 Executive Summary")
+                    st.info(result['summary'])
+                
+                # Key Insights
+                if "key_insights" in result and result["key_insights"]:
+                    st.markdown("### 💡 Key Insights")
+                    for insight in result["key_insights"]:
+                        st.markdown(f"- {insight}")
+                
+                # Recommendations
+                if "recommendations" in result and result["recommendations"]:
+                    st.markdown("### 🎯 Empfehlungen")
+                    for rec in result["recommendations"]:
+                        st.markdown(f"- {rec}")
+                
+                st.markdown("### 🏷️ Erkannte Themen")
+                
+                # Display topics
+                topics = result.get("topics", [])
+                for i, topic in enumerate(topics, 1):
+                    freq_color = {"hoch": "🔴", "mittel": "🟡", "niedrig": "🟢"}.get(topic.get("frequency", ""), "⚪")
+                    sentiment_icon = {"positiv": "😊", "negativ": "😞", "neutral": "😐", "gemischt": "🔄"}.get(topic.get("sentiment_tendency", ""), "")
+                    percentage = topic.get("estimated_percentage", "")
+                    pct_str = f" ~{percentage}%" if percentage else ""
+                    
+                    with st.expander(f"{freq_color} **{topic.get('name', f'Thema {i}')}** ({topic.get('frequency', 'unbekannt')}{pct_str}) {sentiment_icon}"):
+                        st.write(topic.get("description", "Keine Beschreibung"))
+                        
+                        if "example_keywords" in topic:
+                            st.markdown(f"**Keywords:** `{'`, `'.join(topic['example_keywords'])}`")
+                        
+                        if "subtopics" in topic and topic["subtopics"]:
+                            st.markdown(f"**Unterthemen:** {', '.join(topic['subtopics'])}")
+                        
+                        if "sentiment_tendency" in topic:
+                            st.markdown(f"**Stimmungstendenz:** {topic['sentiment_tendency']}")
+                
+                # Reset button
+                if st.button("🔄 Neue Analyse starten"):
+                    st.session_state.ai_topics = None
+                    st.rerun()
             
     st.divider()
     
@@ -242,6 +605,34 @@ with tab2:
 
 with tab3:
     st.header("Qualitäts-Analyse", help="Metriken zur Zufriedenheit und Komplexität der Anfragen.")
+    
+    # Erfolgsrate
+    st.subheader("Erfolgsrate", help="Wurden die Nutzeranliegen gelöst? Basiert auf der letzten Nachricht jeder Konversation.")
+    
+    success_data = filtered_analyzer.calculate_success_rate()
+    
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("✅ Erfolg", success_data['success_count'], 
+                help="User beendete mit positiven Keywords (danke, super, perfekt...)")
+    col2.metric("⚪ Neutral", success_data['neutral_count'], 
+                help="Normale Beendigung ohne eindeutige Signale.")
+    col3.metric("❌ Misserfolg", success_data['failure_count'], 
+                help="Bot konnte nicht helfen oder User war unzufrieden.")
+    col4.metric("📈 Erfolgsquote", f"{success_data['success_rate']}%", 
+                help="Anteil der erfolgreich abgeschlossenen Gespräche.")
+    
+    # Pie Chart für Erfolgsrate
+    outcome_df = pd.DataFrame({
+        'Outcome': ['Erfolg', 'Neutral', 'Misserfolg'],
+        'Count': [success_data['success_count'], success_data['neutral_count'], success_data['failure_count']]
+    })
+    fig_success = px.pie(outcome_df, values='Count', names='Outcome', 
+                         title='Gesprächs-Outcomes',
+                         color='Outcome',
+                         color_discrete_map={'Erfolg': '#2ECC71', 'Neutral': '#95A5A6', 'Misserfolg': '#E74C3C'})
+    st.plotly_chart(fig_success, use_container_width=True)
+    
+    st.divider()
     
     st.subheader("Sentiment-Analyse", help="Analysiert die Stimmung der User-Nachrichten anhand positiver/negativer Keywords und Emojis.")
     

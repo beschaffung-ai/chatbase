@@ -5,7 +5,8 @@ from sklearn.cluster import KMeans
 import nltk
 from nltk.corpus import stopwords
 import re
-from typing import Dict, List, Tuple
+import json
+from typing import Dict, List, Tuple, Optional
 
 class ChatAnalyzer:
     def __init__(self, conv_df: pd.DataFrame, msg_df: pd.DataFrame):
@@ -35,7 +36,7 @@ class ChatAnalyzer:
             nltk.data.find('corpora/stopwords')
         except LookupError:
             nltk.download('stopwords')
-            
+
         self.german_stopwords = stopwords.words('german')
         # Add custom stopwords relevant to chat context
         self.custom_stopwords = self.german_stopwords + ['hallo', 'hi', 'danke', 'bitte', 'ja', 'nein', 'ok', 'okay', 'guten', 'tag']
@@ -84,7 +85,7 @@ class ChatAnalyzer:
         """Extracts top n-grams from user messages"""
         if self.user_msgs.empty:
             return []
-            
+        
         vectorizer = CountVectorizer(
             stop_words=self.custom_stopwords,
             ngram_range=n_gram_range,
@@ -110,7 +111,7 @@ class ChatAnalyzer:
         if self.conv_df.empty or self.conv_df['content'].str.len().sum() == 0:
              self.conv_df['cluster'] = 0
              return self.conv_df, {}
-
+        
         tfidf = TfidfVectorizer(
             stop_words=self.custom_stopwords,
             max_features=1000,
@@ -171,7 +172,7 @@ class ChatAnalyzer:
             total = pos_count + neg_count
             if total == 0:
                 return 0.0
-            
+        
             # Score from -1 to +1
             return (pos_count - neg_count) / total
 
@@ -268,4 +269,299 @@ class ChatAnalyzer:
         }
         
         return stats, bot_msgs[['char_count', 'word_count']]
-"# Updated" 
+
+    def calculate_success_rate(self) -> Dict:
+        """
+        Calculates conversation success rate based on last message analysis.
+        - Success: User ends with positive keywords (danke, super, perfekt, etc.)
+        - Failure: Bot ends with helpless keywords OR user ends with negative keywords
+        - Neutral: Everything else
+        """
+        positive_endings = [
+            'danke', 'super', 'perfekt', 'hat geholfen', 'wunderbar', 'toll',
+            'funktioniert', 'geklappt', 'klasse', 'top', 'prima', 'genial',
+            'vielen dank', 'dankeschön', 'ausgezeichnet', 'sehr gut', 'hilfreich',
+            '👍', '😊', '🙂', '❤️', '🎉', '👏', '✅'
+        ]
+        
+        negative_endings = [
+            'hilft nicht', 'verstehe nicht', 'funktioniert nicht', 'geht nicht',
+            'klappt nicht', 'schlecht', 'unzufrieden', 'enttäuscht', 'frustrierend',
+            'ärgerlich', 'nervig', 'immer noch nicht', 'schon wieder',
+            '😞', '😠', '😡', '👎', '😢', '😤'
+        ]
+        
+        helpless_keywords = [
+            'weiß ich nicht', 'kann ich nicht', 'keine information',
+            'support kontaktieren', 'kundenservice', 'rufen sie an',
+            'leider nicht möglich', 'nicht möglich', 'wende dich an'
+        ]
+        
+        # Get last message per conversation
+        last_msgs = self.msg_df.sort_values('conversation_id').groupby('conversation_id').last().reset_index()
+        
+        def classify_ending(row):
+            if pd.isna(row['content']):
+                return 'neutral'
+            text_lower = row['content'].lower()
+            
+            # User ended with positive = Success
+            if row['role'] == 'user':
+                if any(kw in text_lower for kw in positive_endings):
+                    return 'success'
+                if any(kw in text_lower for kw in negative_endings):
+                    return 'failure'
+            
+            # Bot ended with helpless keywords = Failure
+            if row['role'] == 'assistant':
+                if any(kw in text_lower for kw in helpless_keywords):
+                    return 'failure'
+            
+            return 'neutral'
+        
+        last_msgs['outcome'] = last_msgs.apply(classify_ending, axis=1)
+        
+        outcome_counts = last_msgs['outcome'].value_counts().to_dict()
+        total = len(last_msgs)
+        
+        success_count = outcome_counts.get('success', 0)
+        failure_count = outcome_counts.get('failure', 0)
+        neutral_count = outcome_counts.get('neutral', 0)
+        
+        success_rate = (success_count / total * 100) if total > 0 else 0
+        
+        return {
+            'success_count': success_count,
+            'failure_count': failure_count,
+            'neutral_count': neutral_count,
+            'total': total,
+            'success_rate': round(success_rate, 1),
+            'outcome_df': last_msgs[['conversation_id', 'role', 'content', 'outcome']]
+        }
+
+    def get_keyword_trends(self, freq='W', top_k=10) -> pd.DataFrame:
+        """
+        Extracts top keywords over time.
+        Returns a DataFrame with date, keyword, and count for trend visualization.
+        """
+        # Merge user messages with dates from conversations
+        user_with_dates = self.user_msgs.merge(
+            self.conv_df[['conversation_id', 'date']], 
+            on='conversation_id', 
+            how='left'
+        )
+        
+        # Resample by frequency
+        user_with_dates['period'] = user_with_dates['date'].dt.to_period(freq)
+        
+        # Get unique periods
+        periods = user_with_dates['period'].dropna().unique()
+        
+        trend_data = []
+        
+        for period in periods:
+            period_msgs = user_with_dates[user_with_dates['period'] == period]
+            text = ' '.join(period_msgs['content'].dropna())
+            
+            if len(text.strip()) < 10:
+                continue
+                
+            # Extract keywords using CountVectorizer
+            try:
+                vectorizer = CountVectorizer(
+                    stop_words=self.custom_stopwords,
+                    ngram_range=(1, 1),
+                    max_features=50
+                )
+                X = vectorizer.fit_transform([text])
+                counts = X.sum(axis=0).A1
+                vocab = vectorizer.get_feature_names_out()
+                
+                for word, count in zip(vocab, counts):
+                    trend_data.append({
+                        'period': period.to_timestamp(),
+                        'keyword': word,
+                        'count': int(count)
+                    })
+            except ValueError:
+                continue
+        
+        if not trend_data:
+            return pd.DataFrame(columns=['period', 'keyword', 'count'])
+        
+        trend_df = pd.DataFrame(trend_data)
+        
+        # Get overall top keywords
+        top_keywords = trend_df.groupby('keyword')['count'].sum().nlargest(top_k).index.tolist()
+        
+        # Filter to only top keywords
+        trend_df = trend_df[trend_df['keyword'].isin(top_keywords)]
+        
+        return trend_df
+
+    def perform_ai_topic_modeling(self, sample_size: int = 500, model: str = "gpt-4o") -> Dict:
+        """
+        Uses OpenAI GPT-5.1 to extract topics from conversations.
+        More accurate than K-Means for semantic understanding.
+        
+        GPT-5.1 Features:
+        - 400K context window (allows sending many more conversations)
+        - Better reasoning for topic extraction
+        - Structured JSON output
+        
+        Args:
+            sample_size: Number of conversations to sample (default 500 for better coverage)
+            
+        Returns:
+            Dictionary with topics and metadata
+        """
+        import streamlit as st
+        
+        try:
+            import openai
+            from openai import OpenAI
+        except ImportError:
+            return {"error": "OpenAI package not installed", "topics": []}
+        
+        # Check if API key is configured
+        try:
+            api_key = st.secrets["openai"]["api_key"]
+        except Exception:
+            return {"error": "OpenAI API key not configured in secrets", "topics": []}
+        
+        # Initialize client
+        client = OpenAI(api_key=api_key)
+        
+        # ===== STRATIFIED SAMPLING =====
+        # Ensure we get a representative sample across time and conversation lengths
+        df = self.conv_df.copy()
+        actual_sample_size = min(sample_size, len(df))
+        
+        try:
+            # Calculate conversation length quartiles for stratification
+            if 'message_count' in df.columns and df['message_count'].nunique() > 4:
+                df['length_bucket'] = pd.qcut(df['message_count'], q=4, duplicates='drop')
+            else:
+                df['length_bucket'] = 'all'
+            
+            # Calculate time quartiles for stratification  
+            if 'date' in df.columns and df['date'].nunique() > 4:
+                df['time_bucket'] = pd.qcut(df['date'].astype(int), q=4, duplicates='drop')
+            else:
+                df['time_bucket'] = 'all'
+            
+            # Stratified sampling: try to get equal samples from each bucket
+            sampled_dfs = []
+            length_buckets = df['length_bucket'].unique()
+            time_buckets = df['time_bucket'].unique()
+            n_buckets = len(length_buckets) * len(time_buckets)
+            
+            if n_buckets > 1:
+                for length in length_buckets:
+                    for time in time_buckets:
+                        bucket_df = df[(df['length_bucket'] == length) & (df['time_bucket'] == time)]
+                        if not bucket_df.empty:
+                            n_samples = max(1, actual_sample_size // n_buckets)
+                            sampled_dfs.append(bucket_df.sample(min(n_samples, len(bucket_df))))
+                
+                sample_df = pd.concat(sampled_dfs) if sampled_dfs else df.sample(actual_sample_size)
+            else:
+                sample_df = df.sample(actual_sample_size)
+                
+        except Exception:
+            # Fallback to random sampling if stratification fails
+            sample_df = df.sample(actual_sample_size)
+        
+        # ===== PREPARE CONVERSATION TEXTS =====
+        # With 400K context window, we can send more text per conversation
+        conv_texts = []
+        for _, row in sample_df.iterrows():
+            text = str(row.get('content', ''))[:2000]  # 2000 chars per conversation (4x more than before)
+            if text.strip():
+                # Add metadata for context
+                msg_count = row.get('message_count', 'unknown')
+                conv_texts.append(f"[{msg_count} Nachrichten] {text}")
+        
+        if not conv_texts:
+            return {"error": "No conversation texts found", "topics": []}
+        
+        # With 400K context, we can send up to ~300 conversations safely
+        max_convs = min(300, len(conv_texts))
+        combined = "\n\n---\n\n".join(conv_texts[:max_convs])
+        
+        try:
+            response = client.chat.completions.create(
+                model=model,  # User can choose: gpt-4o, gpt-4o-mini, gpt-5.1, etc.
+                messages=[
+                    {
+                        "role": "system", 
+                        "content": """Du bist ein Senior Data Analyst spezialisiert auf Chatbot-Konversationsanalyse. 
+
+Deine Aufgabe:
+1. Analysiere die folgenden Kundenanfragen aus einem Chatbot
+2. Identifiziere die HAUPTTHEMEN (5-15 Themen je nach Diversität)
+3. Erkenne Muster und Trends
+4. Bewerte die Häufigkeit jedes Themas
+
+Wichtig:
+- Fasse ähnliche Themen zusammen (z.B. "Lieferung" und "Versand" = ein Thema)
+- Erkenne auch Unterprobleme (z.B. "Retoure" hat Unterthemen wie "Rücksendeschein", "Erstattung")
+- Identifiziere emotionale Muster (Frustration, Zufriedenheit)
+
+Antworte NUR im JSON-Format:
+{
+    "topics": [
+        {
+            "name": "Themenname",
+            "description": "Detaillierte Beschreibung was Kunden zu diesem Thema fragen",
+            "frequency": "hoch/mittel/niedrig",
+            "estimated_percentage": 15,
+            "example_keywords": ["keyword1", "keyword2", "keyword3"],
+            "subtopics": ["Unterthema1", "Unterthema2"],
+            "sentiment_tendency": "positiv/neutral/negativ/gemischt"
+        }
+    ],
+    "summary": "Executive Summary der Hauptanliegen (2-3 Sätze)",
+    "key_insights": ["Insight 1", "Insight 2", "Insight 3"],
+    "recommendations": ["Empfehlung 1", "Empfehlung 2"]
+}"""
+                    },
+                    {
+                        "role": "user", 
+                        "content": f"Analysiere diese {len(conv_texts[:max_convs])} Kundenanfragen aus einem Chatbot. Die Stichprobe wurde stratifiziert nach Gesprächslänge und Zeitraum ausgewählt, um repräsentativ zu sein:\n\n{combined}"
+                    }
+                ],
+                response_format={"type": "json_object"},
+                max_tokens=4000,  # Maximum output tokens for detailed analysis
+                temperature=0.2   # Lower temperature for more consistent analysis
+            )
+            
+            # Parse response
+            response_content = response.choices[0].message.content
+            
+            if not response_content:
+                return {"error": "OpenAI returned empty response", "topics": []}
+            
+            try:
+                result = json.loads(response_content)
+            except json.JSONDecodeError as je:
+                return {"error": f"Invalid JSON response: {str(je)[:100]}", "raw_response": response_content[:500], "topics": []}
+            
+            result["conversations_analyzed"] = len(conv_texts[:max_convs])
+            result["total_conversations"] = len(self.conv_df)
+            result["sample_coverage"] = round(len(conv_texts[:max_convs]) / len(self.conv_df) * 100, 1)
+            result["model_used"] = model
+            result["sampling_method"] = "stratified (time + length)"
+            
+            return result
+        
+        except openai.APIError as e:
+            return {"error": f"OpenAI API Error: {e.message}", "topics": []}
+        except openai.APIConnectionError as e:
+            return {"error": f"Connection Error: Could not reach OpenAI", "topics": []}
+        except openai.RateLimitError as e:
+            return {"error": f"Rate Limit: Too many requests, please wait", "topics": []}
+        except openai.AuthenticationError as e:
+            return {"error": f"Authentication Error: Invalid API key", "topics": []}
+        except Exception as e:
+            return {"error": f"Unexpected error: {type(e).__name__}: {str(e)}", "topics": []} 
