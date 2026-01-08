@@ -1,0 +1,165 @@
+import pandas as pd
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
+from sklearn.cluster import KMeans
+from textblob_de import TextBlobDE
+import nltk
+from nltk.corpus import stopwords
+import re
+from typing import Dict, List, Tuple
+
+class ChatAnalyzer:
+    def __init__(self, conv_df: pd.DataFrame, msg_df: pd.DataFrame):
+        self.conv_df = conv_df
+        self.msg_df = msg_df
+        self._prepare_data()
+
+    def _prepare_data(self):
+        # Filter for user messages for content analysis
+        self.user_msgs = self.msg_df[self.msg_df['role'] == 'user'].copy()
+        
+        # Ensure dates are datetime
+        self.conv_df['date'] = pd.to_datetime(self.conv_df['date'])
+        
+        # Clean up potentially existing columns from previous runs/filtering
+        for col in ['content', 'cluster', 'sentiment']:
+            if col in self.conv_df.columns:
+                self.conv_df = self.conv_df.drop(col, axis=1)
+
+        # Aggregate user text per conversation for clustering
+        self.conv_text = self.user_msgs.groupby('conversation_id')['content'].apply(lambda x: ' '.join(x)).reset_index()
+        self.conv_df = self.conv_df.merge(self.conv_text, on='conversation_id', how='left')
+        self.conv_df['content'] = self.conv_df['content'].fillna('')
+
+        # Download nltk resources if needed
+        try:
+            nltk.data.find('corpora/stopwords')
+        except LookupError:
+            nltk.download('stopwords')
+            
+        self.german_stopwords = stopwords.words('german')
+        # Add custom stopwords relevant to chat context
+        self.custom_stopwords = self.german_stopwords + ['hallo', 'hi', 'danke', 'bitte', 'ja', 'nein', 'ok', 'okay', 'guten', 'tag']
+
+    def get_basic_stats(self) -> Dict:
+        """Returns descriptive statistics"""
+        total_conv = len(self.conv_df)
+        total_msgs = len(self.msg_df)
+        avg_duration = self.conv_df['duration_seconds'].mean()
+        avg_msgs_per_conv = self.msg_df.groupby('conversation_id').size().mean()
+        
+        return {
+            'total_conversations': total_conv,
+            'total_messages': total_msgs,
+            'avg_duration_seconds': round(avg_duration, 2) if not np.isnan(avg_duration) else 0,
+            'avg_messages_per_conversation': round(avg_msgs_per_conv, 2)
+        }
+
+    def get_time_distribution(self, freq='D') -> pd.DataFrame:
+        """Returns conversation counts aggregated by time frequency (D=Daily, W=Weekly, M=Monthly)"""
+        return self.conv_df.set_index('date').resample(freq).size().reset_index(name='count')
+
+    def get_heatmap_data(self) -> pd.DataFrame:
+        """Returns a pivot table for Weekday vs Hour heatmap"""
+        df = self.conv_df.copy()
+        df['weekday'] = df['date'].dt.day_name()
+        # Order weekdays
+        cats = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+        df['weekday'] = pd.Categorical(df['weekday'], categories=cats, ordered=True)
+        df['hour'] = df['date'].dt.hour
+        
+        heatmap_data = df.groupby(['weekday', 'hour']).size().reset_index(name='count')
+        return heatmap_data.pivot(index='weekday', columns='hour', values='count').fillna(0)
+
+    def get_exit_analysis(self) -> pd.DataFrame:
+        """
+        Analyzes the last message of each conversation.
+        Returns a DataFrame with last message content and role.
+        """
+        # Get last message per conversation
+        last_msgs = self.msg_df.sort_values('conversation_id').groupby('conversation_id').last().reset_index()
+        return last_msgs[['conversation_id', 'role', 'content']]
+
+
+    def get_top_phrases(self, n_gram_range=(2, 2), top_k=20) -> List[Tuple[str, int]]:
+        """Extracts top n-grams from user messages"""
+        if self.user_msgs.empty:
+            return []
+            
+        vectorizer = CountVectorizer(
+            stop_words=self.custom_stopwords,
+            ngram_range=n_gram_range,
+            max_features=top_k
+        )
+        
+        try:
+            X = vectorizer.fit_transform(self.user_msgs['content'].dropna())
+            counts = X.sum(axis=0).A1
+            vocab = vectorizer.get_feature_names_out()
+            
+            phrases = list(zip(vocab, counts))
+            return sorted(phrases, key=lambda x: x[1], reverse=True)
+        except ValueError:
+            # Handle empty vocabulary or other issues
+            return []
+
+    def perform_topic_modeling(self, n_clusters=5) -> pd.DataFrame:
+        """
+        Performs K-Means clustering on conversations.
+        Returns conv_df with a new 'cluster' column and a dictionary of cluster terms.
+        """
+        if self.conv_df.empty or self.conv_df['content'].str.len().sum() == 0:
+             self.conv_df['cluster'] = 0
+             return self.conv_df, {}
+
+        tfidf = TfidfVectorizer(
+            stop_words=self.custom_stopwords,
+            max_features=1000,
+            min_df=2
+        )
+        
+        try:
+            tfidf_matrix = tfidf.fit_transform(self.conv_df['content'])
+            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+            self.conv_df['cluster'] = kmeans.fit_predict(tfidf_matrix)
+            
+            # Extract top terms per cluster
+            cluster_terms = {}
+            feature_names = tfidf.get_feature_names_out()
+            ordered_centroids = kmeans.cluster_centers_.argsort()[:, ::-1]
+            
+            for i in range(n_clusters):
+                top_terms = [feature_names[ind] for ind in ordered_centroids[i, :5]] # Top 5 terms
+                cluster_terms[i] = ", ".join(top_terms)
+                
+            return self.conv_df, cluster_terms
+            
+        except ValueError:
+            self.conv_df['cluster'] = 0
+            return self.conv_df, {0: "Insufficient Data"}
+
+    def analyze_sentiment(self) -> pd.DataFrame:
+        """Adds sentiment polarity to user messages and averages it per conversation"""
+        def get_sentiment(text):
+            try:
+                return TextBlobDE(text).sentiment.polarity
+            except:
+                return 0.0
+
+        self.user_msgs['sentiment'] = self.user_msgs['content'].apply(get_sentiment)
+        
+        # Average per conversation
+        avg_sentiment = self.user_msgs.groupby('conversation_id')['sentiment'].mean().reset_index()
+        
+        # Merge back to conv_df
+        if 'sentiment' in self.conv_df.columns:
+            self.conv_df = self.conv_df.drop('sentiment', axis=1)
+            
+        self.conv_df = self.conv_df.merge(avg_sentiment, on='conversation_id', how='left')
+        self.conv_df['sentiment'] = self.conv_df['sentiment'].fillna(0)
+        
+        return self.conv_df
+
+    def get_wordcloud_text(self) -> str:
+        """Returns a single string of all user text for wordcloud"""
+        return " ".join(self.user_msgs['content'].dropna().tolist())
