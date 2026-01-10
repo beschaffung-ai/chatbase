@@ -1,9 +1,11 @@
-streamlit
+﻿streamlit
 plotly
 wordcloud
 pandas
-numpy
+numpy<2.4
 scikit-learn
 nltk
 matplotlib
 openai>=1.0.0
+umap-learn
+hdbscan

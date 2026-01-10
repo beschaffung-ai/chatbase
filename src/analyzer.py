@@ -564,4 +564,256 @@ Antworte NUR im JSON-Format:
         except openai.AuthenticationError as e:
             return {"error": f"Authentication Error: Invalid API key", "topics": []}
         except Exception as e:
-            return {"error": f"Unexpected error: {type(e).__name__}: {str(e)}", "topics": []} 
+            return {"error": f"Unexpected error: {type(e).__name__}: {str(e)}", "topics": []}
+
+    def perform_embedding_clustering(self, n_clusters: int = 8, use_hdbscan: bool = True, 
+                                      progress_callback=None) -> Dict:
+        """
+        Performs topic clustering on ALL conversations using OpenAI Embeddings.
+        
+        This method:
+        1. Creates embeddings for ALL conversations (not just a sample)
+        2. Uses UMAP for dimensionality reduction
+        3. Clusters with HDBSCAN (auto) or KMeans (fixed n_clusters)
+        4. Extracts TF-IDF keywords per cluster
+        5. Uses GPT-4o-mini to generate cluster names and descriptions
+        
+        Args:
+            n_clusters: Number of clusters for KMeans (ignored if use_hdbscan=True)
+            use_hdbscan: If True, use HDBSCAN (auto cluster count). If False, use KMeans.
+            progress_callback: Optional callable for progress updates (0.0 to 1.0)
+            
+        Returns:
+            Dictionary with clustered data, descriptions, and visualization data
+        """
+        import streamlit as st
+        
+        # ===== IMPORTS =====
+        try:
+            from openai import OpenAI
+            import umap
+            import hdbscan
+        except ImportError as e:
+            return {"error": f"Missing dependency: {e}. Install with: pip install openai umap-learn hdbscan"}
+        
+        # ===== CHECK API KEY =====
+        try:
+            api_key = st.secrets["openai"]["api_key"]
+        except Exception:
+            return {"error": "OpenAI API key not configured in secrets"}
+        
+        client = OpenAI(api_key=api_key)
+        
+        # ===== PREPARE TEXTS =====
+        df = self.conv_df.copy()
+        texts = df['content'].fillna('').tolist()
+        
+        # Filter out empty texts
+        valid_indices = [i for i, t in enumerate(texts) if len(t.strip()) > 10]
+        valid_texts = [texts[i][:2000] for i in valid_indices]  # Limit to 2000 chars each
+        
+        if len(valid_texts) < 10:
+            return {"error": "Not enough valid conversations for clustering (minimum 10)"}
+        
+        if progress_callback:
+            progress_callback(0.1, "Texte vorbereitet...")
+        
+        # ===== CREATE EMBEDDINGS =====
+        all_embeddings = []
+        batch_size = 500  # OpenAI allows up to 2048, but 500 is safer for memory
+        total_batches = (len(valid_texts) + batch_size - 1) // batch_size
+        
+        try:
+            for batch_idx in range(total_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min(start_idx + batch_size, len(valid_texts))
+                batch = valid_texts[start_idx:end_idx]
+                
+                response = client.embeddings.create(
+                    model="text-embedding-3-small",
+                    input=batch
+                )
+                
+                batch_embeddings = [item.embedding for item in response.data]
+                all_embeddings.extend(batch_embeddings)
+                
+                if progress_callback:
+                    progress = 0.1 + 0.5 * (batch_idx + 1) / total_batches
+                    progress_callback(progress, f"Embeddings erstellt ({end_idx}/{len(valid_texts)})...")
+                    
+        except Exception as e:
+            return {"error": f"Embedding API error: {str(e)}"}
+        
+        # ===== DIMENSIONALITY REDUCTION WITH UMAP =====
+        if progress_callback:
+            progress_callback(0.65, "UMAP Dimensionsreduktion...")
+        
+        try:
+            X = np.array(all_embeddings)
+            
+            # UMAP for visualization (2D)
+            umap_2d = umap.UMAP(
+                n_neighbors=15,
+                min_dist=0.1,
+                n_components=2,
+                metric='cosine',
+                random_state=42
+            )
+            embedding_2d = umap_2d.fit_transform(X)
+            
+            # UMAP for clustering (higher dimension for better clustering)
+            umap_cluster = umap.UMAP(
+                n_neighbors=15,
+                min_dist=0.0,
+                n_components=10,
+                metric='cosine',
+                random_state=42
+            )
+            embedding_cluster = umap_cluster.fit_transform(X)
+            
+        except Exception as e:
+            return {"error": f"UMAP error: {str(e)}"}
+        
+        # ===== CLUSTERING =====
+        if progress_callback:
+            progress_callback(0.75, "Clustering...")
+        
+        try:
+            if use_hdbscan:
+                clusterer = hdbscan.HDBSCAN(
+                    min_cluster_size=max(5, len(valid_texts) // 50),
+                    min_samples=3,
+                    cluster_selection_epsilon=0.5,
+                    metric='euclidean'
+                )
+                labels = clusterer.fit_predict(embedding_cluster)
+            else:
+                kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+                labels = kmeans.fit_predict(embedding_cluster)
+                
+        except Exception as e:
+            return {"error": f"Clustering error: {str(e)}"}
+        
+        # ===== CREATE RESULT DATAFRAME =====
+        # Map back to original indices
+        result_df = df.iloc[valid_indices].copy()
+        result_df['cluster'] = labels
+        result_df['umap_x'] = embedding_2d[:, 0]
+        result_df['umap_y'] = embedding_2d[:, 1]
+        
+        # ===== EXTRACT KEYWORDS PER CLUSTER =====
+        if progress_callback:
+            progress_callback(0.8, "Keywords extrahieren...")
+        
+        unique_clusters = sorted([c for c in set(labels) if c >= 0])  # Exclude noise (-1)
+        cluster_info = {}
+        
+        for cluster_id in unique_clusters:
+            cluster_texts = result_df[result_df['cluster'] == cluster_id]['content'].tolist()
+            cluster_size = len(cluster_texts)
+            
+            # TF-IDF for keywords
+            try:
+                tfidf = TfidfVectorizer(
+                    stop_words=self.custom_stopwords,
+                    max_features=20,
+                    ngram_range=(1, 2)
+                )
+                tfidf_matrix = tfidf.fit_transform(cluster_texts)
+                feature_names = tfidf.get_feature_names_out()
+                
+                # Get top keywords by TF-IDF score sum
+                scores = tfidf_matrix.sum(axis=0).A1
+                top_indices = scores.argsort()[::-1][:10]
+                keywords = [feature_names[i] for i in top_indices]
+            except:
+                keywords = []
+            
+            # Get representative examples
+            examples = cluster_texts[:3] if len(cluster_texts) >= 3 else cluster_texts
+            examples = [ex[:200] + "..." if len(ex) > 200 else ex for ex in examples]
+            
+            cluster_info[cluster_id] = {
+                'size': cluster_size,
+                'percentage': round(cluster_size / len(valid_texts) * 100, 1),
+                'keywords': keywords,
+                'examples': examples
+            }
+        
+        # Handle noise points
+        noise_count = sum(1 for l in labels if l == -1)
+        if noise_count > 0:
+            cluster_info[-1] = {
+                'size': noise_count,
+                'percentage': round(noise_count / len(valid_texts) * 100, 1),
+                'keywords': ['Sonstige', 'Nicht zugeordnet'],
+                'examples': [],
+                'is_noise': True
+            }
+        
+        # ===== GPT CLUSTER NAMING =====
+        if progress_callback:
+            progress_callback(0.85, "GPT Cluster-Beschreibungen...")
+        
+        cluster_descriptions = {}
+        
+        # Only describe top clusters (exclude noise and very small clusters)
+        clusters_to_describe = [c for c in unique_clusters if cluster_info[c]['size'] >= 5][:15]
+        
+        for cluster_id in clusters_to_describe:
+            info = cluster_info[cluster_id]
+            keywords_str = ", ".join(info['keywords'][:8])
+            examples_str = "\n".join([f"- {ex}" for ex in info['examples']])
+            
+            try:
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{
+                        "role": "user",
+                        "content": f"""Analysiere diese Cluster-Daten und gib einen passenden deutschen Namen und eine kurze Beschreibung.
+
+Keywords: {keywords_str}
+
+Beispiel-Anfragen:
+{examples_str}
+
+Antworte im JSON-Format:
+{{"name": "Kurzer Themenname (2-4 Wörter)", "description": "Eine Beschreibung in 1-2 Sätzen was Kunden hier fragen", "sentiment": "positiv/neutral/negativ"}}"""
+                    }],
+                    response_format={"type": "json_object"},
+                    max_tokens=150,
+                    temperature=0.3
+                )
+                
+                desc = json.loads(response.choices[0].message.content)
+                cluster_descriptions[cluster_id] = desc
+                
+            except Exception as e:
+                cluster_descriptions[cluster_id] = {
+                    "name": f"Thema {cluster_id + 1}",
+                    "description": f"Cluster mit Keywords: {keywords_str}",
+                    "sentiment": "neutral"
+                }
+        
+        if progress_callback:
+            progress_callback(1.0, "Fertig!")
+        
+        # ===== PREPARE FINAL RESULT =====
+        return {
+            'success': True,
+            'clustered_df': result_df,
+            'cluster_info': cluster_info,
+            'cluster_descriptions': cluster_descriptions,
+            'total_analyzed': len(valid_texts),
+            'total_conversations': len(df),
+            'n_clusters': len(unique_clusters),
+            'noise_count': noise_count,
+            'method': 'HDBSCAN' if use_hdbscan else f'KMeans (k={n_clusters})',
+            'embedding_model': 'text-embedding-3-small',
+            'visualization_data': {
+                'x': embedding_2d[:, 0].tolist(),
+                'y': embedding_2d[:, 1].tolist(),
+                'labels': labels.tolist(),
+                'texts': [t[:100] for t in valid_texts]  # Truncated for hover
+            }
+        }
