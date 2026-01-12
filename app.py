@@ -2,49 +2,135 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from src.utils import load_data
+from src.utils import load_data, save_uploaded_file, get_cached_data, clear_user_cache
 import os
+import hashlib
+import json
+from pathlib import Path
+from datetime import datetime, timedelta
 
 # Page Config
-st.set_page_config(page_title="Chatbase Analytics", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(
+    page_title="Chatbase Analytics", layout="wide", initial_sidebar_state="expanded"
+)
+
+# ==================== SESSION PERSISTENCE ====================
+SESSION_FILE = Path(".streamlit/active_sessions.json")
+
+
+def load_sessions() -> dict:
+    """Lädt aktive Sessions aus der Datei."""
+    if SESSION_FILE.exists():
+        try:
+            with open(SESSION_FILE, "r") as f:
+                sessions = json.load(f)
+                # Entferne abgelaufene Sessions (älter als 30 Tage)
+                cutoff = (datetime.now() - timedelta(days=30)).isoformat()
+                sessions = {
+                    k: v for k, v in sessions.items() if v.get("created", "") > cutoff
+                }
+                return sessions
+        except:
+            return {}
+    return {}
+
+
+def save_session(username: str, token: str):
+    """Speichert eine Session."""
+    sessions = load_sessions()
+    sessions[token] = {"username": username, "created": datetime.now().isoformat()}
+    SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(SESSION_FILE, "w") as f:
+        json.dump(sessions, f)
+
+
+def get_session(token: str) -> str | None:
+    """Gibt den Username für ein Token zurück, oder None."""
+    sessions = load_sessions()
+    session = sessions.get(token)
+    if session:
+        return session.get("username")
+    return None
+
+
+def delete_session(token: str):
+    """Löscht eine Session."""
+    sessions = load_sessions()
+    if token in sessions:
+        del sessions[token]
+        with open(SESSION_FILE, "w") as f:
+            json.dump(sessions, f)
+
+
+def generate_session_token(username: str) -> str:
+    """Generiert einen sicheren Session-Token für den Benutzer."""
+    secret = st.secrets.get("session_secret", "default-secret-key-change-me")
+    timestamp = datetime.now().isoformat()
+    return hashlib.sha256(f"{username}:{secret}:{timestamp}".encode()).hexdigest()[:32]
+
 
 # ==================== PASSWORD AUTHENTICATION ====================
 def check_password():
     """Returns `True` if the user has entered correct credentials."""
-    
-    # Return True if already logged in
+
+    # Return True if already logged in via session_state
     if st.session_state.get("password_correct", False):
         return True
+
+    # Check for session token in query params (persistent login)
+    query_params = st.query_params
+    session_token = query_params.get("session")
+
+    if session_token:
+        saved_user = get_session(session_token)
+        if saved_user:
+            st.session_state["password_correct"] = True
+            st.session_state["current_user"] = saved_user
+            st.session_state["session_token"] = session_token
+            return True
+        else:
+            # Invalid/expired session - remove from URL
+            st.query_params.clear()
 
     # Show login form
     st.markdown("### 🔐 Login erforderlich")
     st.markdown("Diese App ist passwortgeschützt.")
-    
-    # Use session state to store input values
-    if "login_username" not in st.session_state:
-        st.session_state.login_username = ""
-    if "login_password" not in st.session_state:
-        st.session_state.login_password = ""
-    
-    username = st.text_input("Username", key="login_username")
-    password = st.text_input("Passwort", type="password", key="login_password")
-    
+
+    username = st.text_input("Username", key="login_username_input")
+    password = st.text_input("Passwort", type="password", key="login_password_input")
+    remember_me = st.checkbox(
+        "Angemeldet bleiben",
+        value=True,
+        help="Speichert den Login, sodass du nach F5 eingeloggt bleibst.",
+    )
+
     if st.button("Anmelden"):
         try:
-            if (username in st.secrets["passwords"] and 
-                st.secrets["passwords"][username] == password):
+            if (
+                username in st.secrets["passwords"]
+                and st.secrets["passwords"][username] == password
+            ):
                 st.session_state["password_correct"] = True
                 st.session_state["current_user"] = username
-                # Clear login fields
-                del st.session_state.login_username
-                del st.session_state.login_password
+
+                # Save login with session token for persistence
+                if remember_me:
+                    token = generate_session_token(username)
+                    save_session(username, token)
+                    st.session_state["session_token"] = token
+                    # Add token to URL for persistence across reloads
+                    st.query_params["session"] = token
+
                 st.rerun()
             else:
                 st.error("😕 Falscher Username oder Passwort")
         except Exception as e:
-            st.error(f"😕 Fehler: Secrets nicht konfiguriert. Erstelle .streamlit/secrets.toml")
-    
+            st.error(
+                f"😕 Fehler: Secrets nicht konfiguriert. Erstelle .streamlit/secrets.toml"
+            )
+
     return False
+
 
 # Check authentication
 if not check_password():
@@ -53,7 +139,8 @@ if not check_password():
 # ==================== END AUTHENTICATION ====================
 
 # Custom CSS for Dark Mode adjustments if needed (Streamlit handles most)
-st.markdown("""
+st.markdown(
+    """
 <style>
     .stMetric {
         background-color: #262730;
@@ -61,22 +148,74 @@ st.markdown("""
         border-radius: 5px;
     }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # Sidebar
 st.sidebar.title("Chatbase Analytics")
-st.sidebar.caption(f"Angemeldet als: {st.session_state.get('current_user', 'Unknown')}")
+current_user = st.session_state.get("current_user", "Unknown")
+st.sidebar.caption(f"Angemeldet als: {current_user}")
+
+# Logout Button
+if st.sidebar.button("🚪 Abmelden"):
+    # Delete session from server
+    if "session_token" in st.session_state:
+        delete_session(st.session_state["session_token"])
+    # Clear URL parameter
+    st.query_params.clear()
+    # Clear session state
+    st.session_state["password_correct"] = False
+    st.session_state["current_user"] = None
+    st.session_state.pop("session_token", None)
+    st.rerun()
+
+st.sidebar.divider()
+
+# ==================== DATA CACHING ====================
+# Versuche zuerst gecachte Daten zu laden
+analyzer = None
+cached_metadata = None
+
+# Prüfe auf gecachte Daten
+cached_analyzer, cached_metadata = get_cached_data(current_user)
 
 # File Selection
-uploaded_file = st.sidebar.file_uploader("Upload Chat Log (CSV)", type="csv", 
-                                         help="Lade hier deinen Chatbase-Export hoch (CSV-Format).")
-
-analyzer = None
+uploaded_file = st.sidebar.file_uploader(
+    "Upload Chat Log (CSV)",
+    type="csv",
+    help="Lade hier deinen Chatbase-Export hoch (CSV-Format).",
+)
 
 if uploaded_file:
-    analyzer = load_data(uploaded_file=uploaded_file)
+    # Neue Datei hochgeladen - überschreibt den Cache
+    analyzer = load_data(uploaded_file=uploaded_file, _username=current_user)
+    st.sidebar.success(f"✅ Datei '{uploaded_file.name}' geladen und gespeichert!")
+elif cached_analyzer is not None:
+    # Verwende gecachte Daten
+    analyzer = cached_analyzer
+    if cached_metadata:
+        upload_time = cached_metadata.get("upload_time", "Unbekannt")
+        if hasattr(upload_time, "strftime"):
+            upload_time = upload_time.strftime("%d.%m.%Y %H:%M")
+        st.sidebar.info(
+            f"📂 Gespeicherte Daten geladen\n\n**Datei:** {cached_metadata.get('filename', 'Unbekannt')}\n\n**Hochgeladen:** {upload_time}"
+        )
+
+    # Button zum Löschen des Caches
+    if st.sidebar.button("🗑️ Gespeicherte Daten löschen"):
+        clear_user_cache(current_user)
+        st.rerun()
 else:
-    st.info("👋 Willkommen! Bitte lade eine Chatbase-CSV-Datei hoch, um die Analyse zu starten.")
+    st.info(
+        "👋 Willkommen! Bitte lade eine Chatbase-CSV-Datei hoch, um die Analyse zu starten."
+    )
+    st.markdown(
+        """
+    **Hinweis:** Deine hochgeladenen Daten werden gespeichert, sodass sie auch nach einem 
+    Seiten-Reload verfügbar bleiben (max. 7 Tage).
+    """
+    )
     st.stop()
 
 
@@ -85,18 +224,25 @@ if not analyzer or analyzer.conv_df.empty:
     st.stop()
 
 # Data Filters
-st.sidebar.header("Filter", help="Grenze die Analyse auf einen bestimmten Zeitraum ein.")
+st.sidebar.header(
+    "Filter", help="Grenze die Analyse auf einen bestimmten Zeitraum ein."
+)
 
 # Date Filter
-min_date = analyzer.conv_df['date'].min()
-max_date = analyzer.conv_df['date'].max()
+min_date = analyzer.conv_df["date"].min()
+max_date = analyzer.conv_df["date"].max()
 
-start_date = st.sidebar.date_input("Start Date", min_date, help="Analysiere ab diesem Datum.")
-end_date = st.sidebar.date_input("End Date", max_date, help="Analysiere bis zu diesem Datum.")
+start_date = st.sidebar.date_input(
+    "Start Date", min_date, help="Analysiere ab diesem Datum."
+)
+end_date = st.sidebar.date_input(
+    "End Date", max_date, help="Analysiere bis zu diesem Datum."
+)
 
 # HTML Export Section
 st.sidebar.divider()
 st.sidebar.header("📥 Export", help="Exportiere die Analyse-Ergebnisse als HTML-Datei.")
+
 
 def generate_html_report(analyzer_obj, start_d, end_d, conv_df):
     """Generates a comprehensive HTML report with ALL analyses and professional design."""
@@ -104,158 +250,288 @@ def generate_html_report(analyzer_obj, start_d, end_d, conv_df):
     from io import BytesIO
     from wordcloud import WordCloud
     import matplotlib.pyplot as plt
-    
+
     # ===== COLLECT ALL DATA =====
     stats = analyzer_obj.get_basic_stats()
     success = analyzer_obj.calculate_success_rate()
     helpless = analyzer_obj.get_bot_helplessness()
-    time_dist_daily = analyzer_obj.get_time_distribution(freq='D')
-    time_dist_weekly = analyzer_obj.get_time_distribution(freq='W')
+    time_dist_daily = analyzer_obj.get_time_distribution(freq="D")
+    time_dist_weekly = analyzer_obj.get_time_distribution(freq="W")
     first_qs = analyzer_obj.get_first_questions(top_k=10)
-    top_bigrams = analyzer_obj.get_top_phrases(n_gram_range=(2,2), top_k=10)
-    top_trigrams = analyzer_obj.get_top_phrases(n_gram_range=(3,3), top_k=10)
+    top_bigrams = analyzer_obj.get_top_phrases(n_gram_range=(2, 2), top_k=10)
+    top_trigrams = analyzer_obj.get_top_phrases(n_gram_range=(3, 3), top_k=10)
     heatmap_data = analyzer_obj.get_heatmap_data()
     exit_df = analyzer_obj.get_exit_analysis()
     length_stats, length_df = analyzer_obj.get_response_length_stats()
     sentiment_df = analyzer_obj.analyze_sentiment()
-    keyword_trends = analyzer_obj.get_keyword_trends(freq='W', top_k=8)
-    
+    keyword_trends = analyzer_obj.get_keyword_trends(freq="W", top_k=8)
+
     # ===== GENERATE CHARTS =====
     # Timeline
-    fig_timeline = px.line(time_dist_weekly, x='date', y='count', title='Wöchentliche Konversationen', markers=True)
-    fig_timeline.update_layout(
-        xaxis_title="Datum", yaxis_title="Anzahl",
-        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-        font=dict(color='#eaeaea')
+    fig_timeline = px.line(
+        time_dist_weekly,
+        x="date",
+        y="count",
+        title="Wöchentliche Konversationen",
+        markers=True,
     )
-    
+    fig_timeline.update_layout(
+        xaxis_title="Datum",
+        yaxis_title="Anzahl",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#eaeaea"),
+    )
+
     # Success Pie
-    outcome_df = pd.DataFrame({
-        'Outcome': ['Erfolg', 'Neutral', 'Misserfolg'],
-        'Count': [success['success_count'], success['neutral_count'], success['failure_count']]
-    })
-    fig_success = px.pie(outcome_df, values='Count', names='Outcome', title='Gesprächs-Outcomes',
-                         color='Outcome', color_discrete_map={'Erfolg': '#2ECC71', 'Neutral': '#95A5A6', 'Misserfolg': '#E74C3C'})
-    fig_success.update_layout(paper_bgcolor='rgba(0,0,0,0)', font=dict(color='#eaeaea'))
-    
+    outcome_df = pd.DataFrame(
+        {
+            "Outcome": ["Erfolg", "Neutral", "Misserfolg"],
+            "Count": [
+                success["success_count"],
+                success["neutral_count"],
+                success["failure_count"],
+            ],
+        }
+    )
+    fig_success = px.pie(
+        outcome_df,
+        values="Count",
+        names="Outcome",
+        title="Gesprächs-Outcomes",
+        color="Outcome",
+        color_discrete_map={
+            "Erfolg": "#2ECC71",
+            "Neutral": "#95A5A6",
+            "Misserfolg": "#E74C3C",
+        },
+    )
+    fig_success.update_layout(paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#eaeaea"))
+
     # Heatmap
     if not heatmap_data.empty:
-        fig_heatmap = px.imshow(heatmap_data, 
-                               labels=dict(x="Stunde", y="Wochentag", color="Anzahl"),
-                               x=heatmap_data.columns, y=heatmap_data.index,
-                               title="Support-Auslastung nach Wochentag & Uhrzeit",
-                               aspect="auto", color_continuous_scale="YlOrRd")
-        fig_heatmap.update_layout(paper_bgcolor='rgba(0,0,0,0)', font=dict(color='#eaeaea'))
+        fig_heatmap = px.imshow(
+            heatmap_data,
+            labels=dict(x="Stunde", y="Wochentag", color="Anzahl"),
+            x=heatmap_data.columns,
+            y=heatmap_data.index,
+            title="Support-Auslastung nach Wochentag & Uhrzeit",
+            aspect="auto",
+            color_continuous_scale="YlOrRd",
+        )
+        fig_heatmap.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#eaeaea")
+        )
         heatmap_html = fig_heatmap.to_html(full_html=False, include_plotlyjs=False)
     else:
         heatmap_html = "<p style='color: #888;'>Nicht genügend Daten für Heatmap.</p>"
-    
+
     # Bigrams
     if top_bigrams:
-        df_bigrams = pd.DataFrame(top_bigrams, columns=['Phrase', 'Count'])
-        fig_bigrams = px.bar(df_bigrams, x='Count', y='Phrase', orientation='h', title='Top 10 Häufige Wortpaare (Bigrams)')
-        fig_bigrams.update_layout(yaxis={'categoryorder':'total ascending'}, paper_bgcolor='rgba(0,0,0,0)', 
-                                  plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#eaeaea'))
+        df_bigrams = pd.DataFrame(top_bigrams, columns=["Phrase", "Count"])
+        fig_bigrams = px.bar(
+            df_bigrams,
+            x="Count",
+            y="Phrase",
+            orientation="h",
+            title="Top 10 Häufige Wortpaare (Bigrams)",
+        )
+        fig_bigrams.update_layout(
+            yaxis={"categoryorder": "total ascending"},
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#eaeaea"),
+        )
         bigrams_html = fig_bigrams.to_html(full_html=False, include_plotlyjs=False)
     else:
         bigrams_html = "<p style='color: #888;'>Keine Daten für Bigrams.</p>"
-    
+
     # Trigrams
     if top_trigrams:
-        df_trigrams = pd.DataFrame(top_trigrams, columns=['Phrase', 'Count'])
-        fig_trigrams = px.bar(df_trigrams, x='Count', y='Phrase', orientation='h', title='Top 10 Wort-Trios (Trigrams)')
-        fig_trigrams.update_layout(yaxis={'categoryorder':'total ascending'}, paper_bgcolor='rgba(0,0,0,0)',
-                                   plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#eaeaea'))
+        df_trigrams = pd.DataFrame(top_trigrams, columns=["Phrase", "Count"])
+        fig_trigrams = px.bar(
+            df_trigrams,
+            x="Count",
+            y="Phrase",
+            orientation="h",
+            title="Top 10 Wort-Trios (Trigrams)",
+        )
+        fig_trigrams.update_layout(
+            yaxis={"categoryorder": "total ascending"},
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#eaeaea"),
+        )
         trigrams_html = fig_trigrams.to_html(full_html=False, include_plotlyjs=False)
     else:
         trigrams_html = "<p style='color: #888;'>Keine Daten für Trigrams.</p>"
-    
+
     # First Questions
     if not first_qs.empty:
-        fig_first_q = px.bar(first_qs.head(10), x='Anzahl', y='Frage', orientation='h', title='Top 10 Einstiegsfragen')
-        fig_first_q.update_layout(yaxis={'categoryorder':'total ascending'}, paper_bgcolor='rgba(0,0,0,0)',
-                                  plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#eaeaea'))
+        fig_first_q = px.bar(
+            first_qs.head(10),
+            x="Anzahl",
+            y="Frage",
+            orientation="h",
+            title="Top 10 Einstiegsfragen",
+        )
+        fig_first_q.update_layout(
+            yaxis={"categoryorder": "total ascending"},
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#eaeaea"),
+        )
         first_q_html = fig_first_q.to_html(full_html=False, include_plotlyjs=False)
     else:
         first_q_html = "<p style='color: #888;'>Keine Daten.</p>"
-    
+
     # Exit Analysis
-    last_role_counts = exit_df['role'].value_counts().reset_index()
-    last_role_counts.columns = ['Role', 'Count']
-    fig_exit = px.pie(last_role_counts, values='Count', names='Role', title='Wer sendet die letzte Nachricht?',
-                      color='Role', color_discrete_map={'user': '#FF6B6B', 'assistant': '#4ECDC4'})
-    fig_exit.update_layout(paper_bgcolor='rgba(0,0,0,0)', font=dict(color='#eaeaea'))
-    
+    last_role_counts = exit_df["role"].value_counts().reset_index()
+    last_role_counts.columns = ["Role", "Count"]
+    fig_exit = px.pie(
+        last_role_counts,
+        values="Count",
+        names="Role",
+        title="Wer sendet die letzte Nachricht?",
+        color="Role",
+        color_discrete_map={"user": "#FF6B6B", "assistant": "#4ECDC4"},
+    )
+    fig_exit.update_layout(paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#eaeaea"))
+
     # Message Count Distribution
-    fig_msg_dist = px.histogram(conv_df, x='message_count', nbins=30, 
-                                title='Konversationslänge (Nachrichtenanzahl)',
-                                labels={'message_count': 'Anzahl Nachrichten'})
-    fig_msg_dist.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#eaeaea'))
-    
+    fig_msg_dist = px.histogram(
+        conv_df,
+        x="message_count",
+        nbins=30,
+        title="Konversationslänge (Nachrichtenanzahl)",
+        labels={"message_count": "Anzahl Nachrichten"},
+    )
+    fig_msg_dist.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#eaeaea"),
+    )
+
     # Sentiment Histogram
-    fig_sentiment = px.histogram(sentiment_df, x='sentiment', nbins=20, title='Sentiment-Verteilung',
-                                 labels={'sentiment': 'Sentiment-Score (-1 bis +1)'})
-    fig_sentiment.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#eaeaea'))
-    
+    fig_sentiment = px.histogram(
+        sentiment_df,
+        x="sentiment",
+        nbins=20,
+        title="Sentiment-Verteilung",
+        labels={"sentiment": "Sentiment-Score (-1 bis +1)"},
+    )
+    fig_sentiment.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#eaeaea"),
+    )
+
     # Bot Response Length
-    fig_length = px.histogram(length_df, x='word_count', nbins=30, title='Bot-Antwortlängen (Wörter)',
-                              labels={'word_count': 'Wörter pro Antwort'})
-    fig_length.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#eaeaea'))
-    
+    fig_length = px.histogram(
+        length_df,
+        x="word_count",
+        nbins=30,
+        title="Bot-Antwortlängen (Wörter)",
+        labels={"word_count": "Wörter pro Antwort"},
+    )
+    fig_length.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#eaeaea"),
+    )
+
     # Keyword Trends
     if not keyword_trends.empty:
-        fig_trends = px.line(keyword_trends, x='period', y='count', color='keyword', markers=True,
-                            title='Keyword-Trends über Zeit', labels={'period': 'Woche', 'count': 'Häufigkeit'})
-        fig_trends.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#eaeaea'),
-                                 legend=dict(orientation="h", yanchor="bottom", y=1.02))
+        fig_trends = px.line(
+            keyword_trends,
+            x="period",
+            y="count",
+            color="keyword",
+            markers=True,
+            title="Keyword-Trends über Zeit",
+            labels={"period": "Woche", "count": "Häufigkeit"},
+        )
+        fig_trends.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#eaeaea"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        )
         trends_html = fig_trends.to_html(full_html=False, include_plotlyjs=False)
     else:
         trends_html = "<p style='color: #888;'>Nicht genügend Daten.</p>"
-    
+
     # Word Cloud as Base64 Image
     wordcloud_text = analyzer_obj.get_wordcloud_text()
     if wordcloud_text:
-        wc = WordCloud(width=800, height=400, background_color='#0d1b2a', colormap='viridis',
-                       stopwords=analyzer_obj.custom_stopwords).generate(wordcloud_text)
+        wc = WordCloud(
+            width=800,
+            height=400,
+            background_color="#0d1b2a",
+            colormap="viridis",
+            stopwords=analyzer_obj.custom_stopwords,
+        ).generate(wordcloud_text)
         buf = BytesIO()
         plt.figure(figsize=(10, 5))
-        plt.imshow(wc, interpolation='bilinear')
-        plt.axis('off')
+        plt.imshow(wc, interpolation="bilinear")
+        plt.axis("off")
         plt.tight_layout(pad=0)
-        plt.savefig(buf, format='png', facecolor='#0d1b2a', bbox_inches='tight')
+        plt.savefig(buf, format="png", facecolor="#0d1b2a", bbox_inches="tight")
         plt.close()
         buf.seek(0)
         wc_base64 = base64.b64encode(buf.read()).decode()
         wordcloud_html = f'<img src="data:image/png;base64,{wc_base64}" style="width: 100%; border-radius: 12px;" alt="Word Cloud">'
     else:
-        wordcloud_html = "<p style='color: #888;'>Nicht genügend Text für Wordcloud.</p>"
-    
+        wordcloud_html = (
+            "<p style='color: #888;'>Nicht genügend Text für Wordcloud.</p>"
+        )
+
     # Source Distribution
     source_html = ""
-    if 'source' in conv_df.columns and conv_df['source'].nunique() > 1:
-        source_counts = conv_df['source'].value_counts().reset_index()
-        source_counts.columns = ['source', 'count']
-        fig_source = px.pie(source_counts, values='count', names='source', title='Quellenverteilung')
-        fig_source.update_layout(paper_bgcolor='rgba(0,0,0,0)', font=dict(color='#eaeaea'))
+    if "source" in conv_df.columns and conv_df["source"].nunique() > 1:
+        source_counts = conv_df["source"].value_counts().reset_index()
+        source_counts.columns = ["source", "count"]
+        fig_source = px.pie(
+            source_counts, values="count", names="source", title="Quellenverteilung"
+        )
+        fig_source.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#eaeaea")
+        )
         source_html = f'<div class="chart-box">{fig_source.to_html(full_html=False, include_plotlyjs=False)}</div>'
-    
+
     # Komplexitäts-Klassifizierung
     def classify_length(n):
-        if n <= 3: return "Kurz (1-3)"
-        if n <= 10: return "Mittel (4-10)"
+        if n <= 3:
+            return "Kurz (1-3)"
+        if n <= 10:
+            return "Mittel (4-10)"
         return "Lang (>10)"
+
     conv_df_copy = conv_df.copy()
-    conv_df_copy['length_class'] = conv_df_copy['message_count'].apply(classify_length)
-    class_counts = conv_df_copy['length_class'].value_counts().reset_index()
-    class_counts.columns = ['Klasse', 'Anzahl']
-    fig_complexity = px.pie(class_counts, values='Anzahl', names='Klasse', title='Gesprächskomplexität',
-                            color='Klasse', color_discrete_map={'Kurz (1-3)': '#2ECC71', 'Mittel (4-10)': '#F39C12', 'Lang (>10)': '#E74C3C'})
-    fig_complexity.update_layout(paper_bgcolor='rgba(0,0,0,0)', font=dict(color='#eaeaea'))
-    
+    conv_df_copy["length_class"] = conv_df_copy["message_count"].apply(classify_length)
+    class_counts = conv_df_copy["length_class"].value_counts().reset_index()
+    class_counts.columns = ["Klasse", "Anzahl"]
+    fig_complexity = px.pie(
+        class_counts,
+        values="Anzahl",
+        names="Klasse",
+        title="Gesprächskomplexität",
+        color="Klasse",
+        color_discrete_map={
+            "Kurz (1-3)": "#2ECC71",
+            "Mittel (4-10)": "#F39C12",
+            "Lang (>10)": "#E74C3C",
+        },
+    )
+    fig_complexity.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#eaeaea")
+    )
+
     # ===== BUILD HTML =====
     from datetime import datetime
+
     generated_at = datetime.now().strftime("%d.%m.%Y %H:%M")
-    
+
     html = f"""
     <!DOCTYPE html>
     <html lang="de">
@@ -600,528 +876,913 @@ def generate_html_report(analyzer_obj, start_d, end_d, conv_df):
     """
     return html
 
+
 # Filter Logic
-mask = (analyzer.conv_df['date'].dt.date >= start_date) & (analyzer.conv_df['date'].dt.date <= end_date)
+mask = (analyzer.conv_df["date"].dt.date >= start_date) & (
+    analyzer.conv_df["date"].dt.date <= end_date
+)
 filtered_conv_df = analyzer.conv_df.loc[mask]
-filtered_msg_df = analyzer.msg_df[analyzer.msg_df['conversation_id'].isin(filtered_conv_df['conversation_id'])]
+filtered_msg_df = analyzer.msg_df[
+    analyzer.msg_df["conversation_id"].isin(filtered_conv_df["conversation_id"])
+]
 
 # Re-initialize analyzer with filtered data for consistent stats/nlp
 # (Optimized: Instead of re-parsing, we could update analyzer state, but creating new instance is cleaner for filtered stats)
-# However, analyzer computes heavy stuff on init. 
+# However, analyzer computes heavy stuff on init.
 # Better: Methods in analyzer should accept df as argument or we update attributes.
 # Let's update the attributes of a fresh analyzer instance or modify the existing one carefully.
 # Modifying the existing one is risky if we want to reset.
 # Simpler: Create a new lightweight analyzer or just use filtered DFs for charts, and call analyzer methods on filtered DFs.
-# But analyzer methods use self.conv_df. 
+# But analyzer methods use self.conv_df.
 # Let's instantiate a new Analyzer with filtered data.
-filtered_analyzer = analyzer # Fallback
+filtered_analyzer = analyzer  # Fallback
 try:
     # We need to manually construct it to avoid re-downloading stopwords etc if possible, but init is fast enough except downloads.
     from src.analyzer import ChatAnalyzer
+
     filtered_analyzer = ChatAnalyzer(filtered_conv_df, filtered_msg_df)
 except Exception as e:
     st.error(f"Error filtering data: {e}")
 
 # Export Button (now that filtered_analyzer is defined)
-if st.sidebar.button("📄 HTML-Report generieren", help="Erstellt einen vollständigen Report mit ALLEN Analysen als interaktive HTML-Datei."):
+if st.sidebar.button(
+    "📄 HTML-Report generieren",
+    help="Erstellt einen vollständigen Report mit ALLEN Analysen als interaktive HTML-Datei.",
+):
     with st.spinner("Generiere umfassenden Report... (kann einige Sekunden dauern)"):
-        html_report = generate_html_report(filtered_analyzer, start_date, end_date, filtered_conv_df)
+        html_report = generate_html_report(
+            filtered_analyzer, start_date, end_date, filtered_conv_df
+        )
         st.sidebar.download_button(
             label="⬇️ HTML herunterladen",
             data=html_report,
             file_name=f"chatbase_report_{start_date}_{end_date}.html",
-            mime="text/html"
+            mime="text/html",
         )
         st.sidebar.success("✅ Report generiert!")
 
 # Layout
 st.title("🤖 Chatbot Conversation Analysis")
 
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Überblick", "💬 Themen & Inhalte", "🧠 Qualität & Sentiment", "📂 Daten-Explorer"])
+tab1, tab2, tab3, tab4 = st.tabs(
+    [
+        "📊 Überblick",
+        "💬 Themen & Inhalte",
+        "🧠 Qualität & Sentiment",
+        "📂 Daten-Explorer",
+    ]
+)
 
 with tab1:
-    st.header("Deskriptive Statistik", help="Allgemeine Kennzahlen zum Nachrichtenaufkommen.")
+    st.header(
+        "Deskriptive Statistik", help="Allgemeine Kennzahlen zum Nachrichtenaufkommen."
+    )
     stats = filtered_analyzer.get_basic_stats()
-    
+
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Konversationen", stats['total_conversations'], help="Anzahl der geführten Gespräche im gewählten Zeitraum.")
-    col2.metric("Nachrichten", stats['total_messages'], help="Gesamtzahl aller ausgetauschten Nachrichten (User + Bot).")
-    col3.metric("Ø Dauer (sek)", stats['avg_duration_seconds'], help="Durchschnittliche Zeit zwischen erster und letzter Nachricht.")
-    col4.metric("Ø Msgs/Conv", stats['avg_messages_per_conversation'], help="Wie viele Nachrichten werden durchschnittlich pro Gespräch ausgetauscht?")
-    
+    col1.metric(
+        "Konversationen",
+        stats["total_conversations"],
+        help="Anzahl der geführten Gespräche im gewählten Zeitraum.",
+    )
+    col2.metric(
+        "Nachrichten",
+        stats["total_messages"],
+        help="Gesamtzahl aller ausgetauschten Nachrichten (User + Bot).",
+    )
+    col3.metric(
+        "Ø Dauer (sek)",
+        stats["avg_duration_seconds"],
+        help="Durchschnittliche Zeit zwischen erster und letzter Nachricht.",
+    )
+    col4.metric(
+        "Ø Msgs/Conv",
+        stats["avg_messages_per_conversation"],
+        help="Wie viele Nachrichten werden durchschnittlich pro Gespräch ausgetauscht?",
+    )
+
     st.divider()
-    
+
     # Timeline
-    st.subheader("Entwicklung über Zeit", help="Zeigt, an welchen Tagen wie viele Gespräche stattgefunden haben.")
-    
+    st.subheader(
+        "Entwicklung über Zeit",
+        help="Zeigt, an welchen Tagen wie viele Gespräche stattgefunden haben.",
+    )
+
     # Toggle für Aggregation
-    time_agg = st.radio("Zeitraum-Aggregation:", ["Täglich", "Wöchentlich"], horizontal=True,
-                        help="Wähle, ob du die Daten pro Tag oder pro Woche sehen möchtest.")
-    freq = 'D' if time_agg == "Täglich" else 'W'
-    
+    time_agg = st.radio(
+        "Zeitraum-Aggregation:",
+        ["Täglich", "Wöchentlich"],
+        horizontal=True,
+        help="Wähle, ob du die Daten pro Tag oder pro Woche sehen möchtest.",
+    )
+    freq = "D" if time_agg == "Täglich" else "W"
+
     time_counts = filtered_analyzer.get_time_distribution(freq=freq)
-    fig_timeline = px.line(time_counts, x='date', y='count', title=f'{time_agg}e Konversationen', markers=True)
+    fig_timeline = px.line(
+        time_counts,
+        x="date",
+        y="count",
+        title=f"{time_agg}e Konversationen",
+        markers=True,
+    )
     fig_timeline.update_layout(xaxis_title="Datum", yaxis_title="Anzahl")
     st.plotly_chart(fig_timeline, use_container_width=True)
-    
+
     # Heatmap (Weekday x Hour)
-    st.subheader("Support-Auslastung (Heatmap)", help="Dunkle Felder zeigen Zeiten mit hoher Aktivität. Ideal für die Personalplanung.")
+    st.subheader(
+        "Support-Auslastung (Heatmap)",
+        help="Dunkle Felder zeigen Zeiten mit hoher Aktivität. Ideal für die Personalplanung.",
+    )
     heatmap_data = filtered_analyzer.get_heatmap_data()
     if not heatmap_data.empty:
-        fig_heatmap = px.imshow(heatmap_data, 
-                               labels=dict(x="Stunde", y="Wochentag", color="Anzahl"),
-                               x=heatmap_data.columns,
-                               y=heatmap_data.index,
-                               title="Konversationen nach Zeit & Tag",
-                               aspect="auto",
-                               color_continuous_scale="YlOrRd")  # Gelb (wenig) -> Orange -> Rot (viel)
+        fig_heatmap = px.imshow(
+            heatmap_data,
+            labels=dict(x="Stunde", y="Wochentag", color="Anzahl"),
+            x=heatmap_data.columns,
+            y=heatmap_data.index,
+            title="Konversationen nach Zeit & Tag",
+            aspect="auto",
+            color_continuous_scale="YlOrRd",
+        )  # Gelb (wenig) -> Orange -> Rot (viel)
         st.plotly_chart(fig_heatmap, use_container_width=True)
     else:
         st.info("Zu wenig Daten für Heatmap.")
 
     # Source Distribution if available
-    if 'source' in filtered_conv_df.columns and filtered_conv_df['source'].nunique() > 1:
-        st.subheader("Quellen", help="Woher kommen die Konversationen? (z.B. Widget, API, etc.)")
-        source_counts = filtered_conv_df['source'].value_counts().reset_index()
-        source_counts.columns = ['source', 'count']
-        fig_source = px.pie(source_counts, values='count', names='source', title='Verteilung nach Quelle')
+    if (
+        "source" in filtered_conv_df.columns
+        and filtered_conv_df["source"].nunique() > 1
+    ):
+        st.subheader(
+            "Quellen", help="Woher kommen die Konversationen? (z.B. Widget, API, etc.)"
+        )
+        source_counts = filtered_conv_df["source"].value_counts().reset_index()
+        source_counts.columns = ["source", "count"]
+        fig_source = px.pie(
+            source_counts,
+            values="count",
+            names="source",
+            title="Verteilung nach Quelle",
+        )
         st.plotly_chart(fig_source, use_container_width=True)
 
 with tab2:
-    st.header("Themen & Inhalte", help="Analyse, worüber die Nutzer sprechen und wie Gespräche verlaufen.")
-    
+    st.header(
+        "Themen & Inhalte",
+        help="Analyse, worüber die Nutzer sprechen und wie Gespräche verlaufen.",
+    )
+
     # Keyword Trends über Zeit
-    st.subheader("Themen-Trend über Zeit", help="Zeigt, welche Keywords pro Woche/Monat am häufigsten genannt werden. Ideal um Trends und saisonale Themen zu erkennen.")
-    
-    trend_freq = st.radio("Trend-Aggregation:", ["Wöchentlich", "Monatlich"], horizontal=True,
-                          help="Wähle, ob du die Keywords pro Woche oder pro Monat sehen möchtest.", key="trend_freq")
-    trend_top_k = st.slider("Anzahl Top-Keywords:", 5, 15, 10, 
-                            help="Wie viele der häufigsten Keywords sollen angezeigt werden?")
-    
-    freq_map = {'Wöchentlich': 'W', 'Monatlich': 'M'}
-    trend_data = filtered_analyzer.get_keyword_trends(freq=freq_map[trend_freq], top_k=trend_top_k)
-    
+    st.subheader(
+        "Themen-Trend über Zeit",
+        help="Zeigt, welche Keywords pro Woche/Monat am häufigsten genannt werden. Ideal um Trends und saisonale Themen zu erkennen.",
+    )
+
+    trend_freq = st.radio(
+        "Trend-Aggregation:",
+        ["Wöchentlich", "Monatlich"],
+        horizontal=True,
+        help="Wähle, ob du die Keywords pro Woche oder pro Monat sehen möchtest.",
+        key="trend_freq",
+    )
+    trend_top_k = st.slider(
+        "Anzahl Top-Keywords:",
+        5,
+        15,
+        10,
+        help="Wie viele der häufigsten Keywords sollen angezeigt werden?",
+    )
+
+    freq_map = {"Wöchentlich": "W", "Monatlich": "M"}
+    trend_data = filtered_analyzer.get_keyword_trends(
+        freq=freq_map[trend_freq], top_k=trend_top_k
+    )
+
     if not trend_data.empty:
-        fig_trend = px.line(trend_data, x='period', y='count', color='keyword',
-                           title=f'Top {trend_top_k} Keywords im Zeitverlauf ({trend_freq})',
-                           labels={'period': 'Zeitraum', 'count': 'Häufigkeit', 'keyword': 'Keyword'},
-                           markers=True)
-        fig_trend.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+        fig_trend = px.line(
+            trend_data,
+            x="period",
+            y="count",
+            color="keyword",
+            title=f"Top {trend_top_k} Keywords im Zeitverlauf ({trend_freq})",
+            labels={"period": "Zeitraum", "count": "Häufigkeit", "keyword": "Keyword"},
+            markers=True,
+        )
+        fig_trend.update_layout(
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
         st.plotly_chart(fig_trend, use_container_width=True)
     else:
         st.info("Nicht genügend Daten für Trend-Analyse.")
-    
+
     st.divider()
-    
+
     # Erste Fragen Analyse
-    st.subheader("Häufigste Einstiegsfragen", help="Womit starten die Nutzer das Gespräch? Zeigt die Hauptanliegen.")
+    st.subheader(
+        "Häufigste Einstiegsfragen",
+        help="Womit starten die Nutzer das Gespräch? Zeigt die Hauptanliegen.",
+    )
     first_questions = filtered_analyzer.get_first_questions(top_k=10)
     if not first_questions.empty:
-        fig_first_q = px.bar(first_questions, x='Anzahl', y='Frage', orientation='h', 
-                            title='Top 10 erste User-Nachrichten')
-        fig_first_q.update_layout(yaxis={'categoryorder':'total ascending'})
+        fig_first_q = px.bar(
+            first_questions,
+            x="Anzahl",
+            y="Frage",
+            orientation="h",
+            title="Top 10 erste User-Nachrichten",
+        )
+        fig_first_q.update_layout(yaxis={"categoryorder": "total ascending"})
         st.plotly_chart(fig_first_q, use_container_width=True)
     else:
         st.info("Keine Daten für Einstiegsfragen verfügbar.")
-    
+
     st.divider()
-    
+
     col1, col2 = st.columns(2)
-    
+
     with col1:
-        st.subheader("Häufigste Phrasen (Bigrams)", help="Häufige Wortpaare (z.B. 'Konto eröffnen').")
-        top_phrases = filtered_analyzer.get_top_phrases(n_gram_range=(2,2), top_k=10)
+        st.subheader(
+            "Häufigste Phrasen (Bigrams)",
+            help="Häufige Wortpaare (z.B. 'Konto eröffnen').",
+        )
+        top_phrases = filtered_analyzer.get_top_phrases(n_gram_range=(2, 2), top_k=10)
         if top_phrases:
-            df_phrases = pd.DataFrame(top_phrases, columns=['Phrase', 'Count'])
-            fig_bar = px.bar(df_phrases, x='Count', y='Phrase', orientation='h', title='Top 10 Bigrams')
-            fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
+            df_phrases = pd.DataFrame(top_phrases, columns=["Phrase", "Count"])
+            fig_bar = px.bar(
+                df_phrases,
+                x="Count",
+                y="Phrase",
+                orientation="h",
+                title="Top 10 Bigrams",
+            )
+            fig_bar.update_layout(yaxis={"categoryorder": "total ascending"})
             st.plotly_chart(fig_bar, use_container_width=True)
         else:
             st.info("Keine Daten für Phrasen verfügbar.")
 
     with col2:
-        st.subheader("Häufigste Phrasen (Trigrams)", help="Häufige Wort-Trios (z.B. 'wie viel kostet').")
-        top_trigrams = filtered_analyzer.get_top_phrases(n_gram_range=(3,3), top_k=10)
+        st.subheader(
+            "Häufigste Phrasen (Trigrams)",
+            help="Häufige Wort-Trios (z.B. 'wie viel kostet').",
+        )
+        top_trigrams = filtered_analyzer.get_top_phrases(n_gram_range=(3, 3), top_k=10)
         if top_trigrams:
-            df_tri = pd.DataFrame(top_trigrams, columns=['Phrase', 'Count'])
-            fig_bar_tri = px.bar(df_tri, x='Count', y='Phrase', orientation='h', title='Top 10 Trigrams')
-            fig_bar_tri.update_layout(yaxis={'categoryorder':'total ascending'})
+            df_tri = pd.DataFrame(top_trigrams, columns=["Phrase", "Count"])
+            fig_bar_tri = px.bar(
+                df_tri, x="Count", y="Phrase", orientation="h", title="Top 10 Trigrams"
+            )
+            fig_bar_tri.update_layout(yaxis={"categoryorder": "total ascending"})
             st.plotly_chart(fig_bar_tri, use_container_width=True)
         else:
             st.info("Keine Daten für Trigrams verfügbar.")
-            
+
     st.divider()
-    
-    st.subheader("Topic Clustering", help="Gruppiert Gespräche automatisch in Themencluster.")
-    
+
+    st.subheader(
+        "Topic Clustering", help="Gruppiert Gespräche automatisch in Themencluster."
+    )
+
     # Auswahl der Methode
     clustering_method = st.radio(
         "Clustering-Methode:",
         ["K-Means (Lokal, kostenlos)", "🧠 Embedding (Alle Daten, empfohlen)"],
         horizontal=True,
-        help="K-Means: kostenlos, schnell, weniger genau | Embedding: ALLE Daten mit OpenAI Embeddings + GPT (~$0.07)"
+        help="K-Means: kostenlos, schnell, weniger genau | Embedding: ALLE Daten mit OpenAI Embeddings + GPT (~$0.07)",
     )
-    
+
     if clustering_method == "K-Means (Lokal, kostenlos)":
-        st.info("⚡ **K-Means** ist kostenlos und schnell, aber weniger genau als Embedding-Clustering.")
-        
-        run_clustering = st.toggle("K-Means Clustering aktivieren", value=False,
-                                   help="Schalte ein, um die Themen-Analyse zu starten.")
-        
+        st.info(
+            "⚡ **K-Means** ist kostenlos und schnell, aber weniger genau als Embedding-Clustering."
+        )
+
+        run_clustering = st.toggle(
+            "K-Means Clustering aktivieren",
+            value=False,
+            help="Schalte ein, um die Themen-Analyse zu starten.",
+        )
+
         if run_clustering:
-            if 'cluster_data' not in st.session_state:
+            if "cluster_data" not in st.session_state:
                 st.session_state.cluster_data = None
-            
+
             if st.session_state.cluster_data is None:
                 with st.spinner("Analysiere Themen mit K-Means..."):
-                    clustered_df, cluster_terms = filtered_analyzer.perform_topic_modeling(n_clusters=5)
+                    clustered_df, cluster_terms = (
+                        filtered_analyzer.perform_topic_modeling(n_clusters=5)
+                    )
                     st.session_state.cluster_data = (clustered_df, cluster_terms)
-            
+
             clustered_df, cluster_terms = st.session_state.cluster_data
-            
-            cluster_stats = clustered_df.groupby('cluster').agg({
-                'conversation_id': 'count',
-                'duration_seconds': 'mean'
-            }).reset_index()
-            cluster_stats['Topic Terms'] = cluster_stats['cluster'].map(cluster_terms)
-            
-            st.dataframe(cluster_stats.style.format({'duration_seconds': '{:.1f}'}))
-            
-            fig_cluster = px.bar(cluster_stats, x='cluster', y='conversation_id', 
-                                 hover_data=['Topic Terms'], 
-                                 title='Konversationen pro Cluster',
-                                 labels={'conversation_id': 'Anzahl', 'cluster': 'Cluster ID'})
+
+            cluster_stats = (
+                clustered_df.groupby("cluster")
+                .agg({"conversation_id": "count", "duration_seconds": "mean"})
+                .reset_index()
+            )
+            cluster_stats["Topic Terms"] = cluster_stats["cluster"].map(cluster_terms)
+
+            st.dataframe(cluster_stats.style.format({"duration_seconds": "{:.1f}"}))
+
+            fig_cluster = px.bar(
+                cluster_stats,
+                x="cluster",
+                y="conversation_id",
+                hover_data=["Topic Terms"],
+                title="Konversationen pro Cluster",
+                labels={"conversation_id": "Anzahl", "cluster": "Cluster ID"},
+            )
             st.plotly_chart(fig_cluster, use_container_width=True)
-    
+
     else:  # Embedding Clustering (Alle Daten)
-        st.success("🧠 **Embedding Clustering** analysiert **ALLE** Konversationen mit OpenAI Embeddings + GPT-Beschreibungen.")
-        
-        st.markdown("""
+        st.success(
+            "🧠 **Embedding Clustering** analysiert **ALLE** Konversationen mit OpenAI Embeddings + GPT-Beschreibungen."
+        )
+
+        st.markdown(
+            """
         **So funktioniert es:**
-        1. 📊 Alle Konversationen werden in semantische Vektoren umgewandelt (Embeddings)
+        1. 📊 Alle Konversationen werden in semantische Vektoren umgewandelt (OpenAI Embeddings)
         2. 🔍 UMAP reduziert die Dimensionen für besseres Clustering
         3. 🎯 HDBSCAN findet automatisch die Themengruppen
         4. 🤖 GPT-4o-mini benennt und beschreibt jeden Cluster
         
         **Kosten:** ~$0.05-0.10 für 5.000 Konversationen
-        """)
-        
+        """
+        )
+
         col1, col2 = st.columns(2)
         with col1:
-            use_hdbscan = st.checkbox("HDBSCAN (automatische Cluster-Anzahl)", value=True,
-                                      help="HDBSCAN findet automatisch die optimale Anzahl an Clustern.")
+            use_hdbscan = st.checkbox(
+                "HDBSCAN (automatische Cluster-Anzahl)",
+                value=True,
+                help="HDBSCAN findet automatisch die optimale Anzahl an Clustern.",
+            )
+
+        # Parameter-Bereich
+        total_docs = len(filtered_conv_df)
+
+        # Default Werte
+        n_clusters_embed = 8
+        min_cluster_s = 15
+        epsilon_val = 0.0
+
         with col2:
             if not use_hdbscan:
                 n_clusters_embed = st.slider("Anzahl Cluster (K-Means):", 3, 20, 8)
+
+        if use_hdbscan:
+            st.markdown("##### 🎛️ Feintuning")
+
+            # 1. Cluster Größe Slider
+            # Dynamischer Range basierend auf Datenmenge
+            max_slider_val = max(100, total_docs // 10)
+            default_val = max(15, total_docs // 50)  # ca 2% als Default
+
+            min_cluster_s = st.slider(
+                "Minimale Cluster-Größe",
+                min_value=5,
+                max_value=max_slider_val,
+                value=default_val,
+                help="Wie viele Konversationen muss ein Thema mindestens haben? Kleiner = mehr Nischenthemen, Größer = nur Hauptthemen.",
+            )
+
+            # Feedback zur Cluster-Größe
+            percentage = (min_cluster_s / total_docs) * 100
+            if 1 <= percentage <= 5:
+                st.caption(
+                    f"✅ **Optimal:** {percentage:.1f}% der Daten (Empfohlen: 1-5%)"
+                )
+            elif percentage < 1:
+                st.caption(
+                    f"⚠️ **Sehr fein:** {percentage:.1f}% - Kann zu vielen kleinen Splitter-Gruppen führen."
+                )
             else:
-                n_clusters_embed = 8  # Wird ignoriert bei HDBSCAN
-        
-        run_embedding_clustering = st.toggle("🚀 Embedding-Analyse starten", value=False,
-                                             help="Startet die vollständige Embedding-Analyse aller Konversationen.")
-        
-        if run_embedding_clustering:
-            if 'embedding_result' not in st.session_state:
-                st.session_state.embedding_result = None
-            
-            if st.session_state.embedding_result is None:
+                st.caption(
+                    f"⚠️ **Sehr grob:** {percentage:.1f}% - Findet nur sehr große Hauptthemen."
+                )
+
+            # 2. Epsilon Slider
+            epsilon_val = st.slider(
+                "Zusammenhalt (Epsilon)",
+                min_value=0.0,
+                max_value=0.5,
+                value=0.0,
+                step=0.1,
+                help="0.0 = Strikte Trennung von Themen. Höhere Werte (z.B. 0.3) fassen ähnliche Themen eher zusammen.",
+            )
+
+        # Start Button statt Toggle
+        if st.button("🚀 Analyse starten", type="primary"):
+            st.session_state.run_clustering_now = True
+
+        # Check ob Ergebnisse da sind oder Analyse getriggert wurde
+        if st.session_state.get("run_clustering_now", False) or (
+            st.session_state.get("embedding_result") is not None
+            and "error" not in st.session_state.embedding_result
+        ):
+
+            # Wenn Button gedrückt wurde, neu berechnen
+            if st.session_state.get("run_clustering_now", False):
+                # Reset trigger
+                st.session_state.run_clustering_now = False
+
                 progress_bar = st.progress(0, text="Starte Analyse...")
                 status_text = st.empty()
-                
+
                 def update_progress(value, text):
                     progress_bar.progress(value, text=text)
                     status_text.text(text)
-                
+
+                # Prüfen auf existierende Embeddings für Cache
+                cached_embs = None
+                if (
+                    st.session_state.get("embedding_result")
+                    and "cached_embeddings" in st.session_state.embedding_result
+                ):
+                    # Wir nutzen die alten Embeddings WENN die Datenmenge gleich ist (einfacher Check)
+                    # Für perfekten Check müsste man Hash prüfen, aber Länge ist guter Proxy hier
+                    if st.session_state.embedding_result.get("total_analyzed") == len(
+                        filtered_analyzer.conv_df
+                    ):  # Nur grober Check, besser wäre Hash
+                        # Wir gehen davon aus, dass es dieselben Daten sind wenn wir nur Slider bewegen
+                        # Aber filtered_analyzer ist neu instanziiert.
+                        # Wir vertrauen darauf, dass der User nur Parameter geändert hat.
+                        cached_embs = st.session_state.embedding_result.get(
+                            "cached_embeddings"
+                        )
+                        st.info("♻️ Nutze existierende Embeddings (spart Kosten & Zeit)")
+
                 result = filtered_analyzer.perform_embedding_clustering(
                     n_clusters=n_clusters_embed,
                     use_hdbscan=use_hdbscan,
-                    progress_callback=update_progress
+                    min_cluster_size=min_cluster_s,
+                    min_samples=3,  # Bleibt fix auf 3 wie besprochen
+                    epsilon=epsilon_val,
+                    cached_embeddings=cached_embs,
+                    progress_callback=update_progress,
                 )
+
                 st.session_state.embedding_result = result
                 progress_bar.empty()
                 status_text.empty()
-            
+
+            # Ab hier: Ergebnis anzeigen (aus Session State)
             result = st.session_state.embedding_result
-            
+
             if "error" in result:
                 st.error(f"❌ Fehler: {result['error']}")
             else:
                 # Success metrics
                 col1, col2, col3, col4 = st.columns(4)
                 col1.metric("✅ Analysiert", f"{result.get('total_analyzed', 0):,}")
-                col2.metric("📊 Cluster", result.get('n_clusters', 0))
-                col3.metric("🔧 Methode", result.get('method', 'HDBSCAN'))
+                col2.metric("📊 Cluster", result.get("n_clusters", 0))
+                col3.metric("🔧 Methode", result.get("method", "HDBSCAN"))
                 col4.metric("🎯 Abdeckung", "100%")
-                
-                if result.get('noise_count', 0) > 0:
-                    st.caption(f"ℹ️ {result['noise_count']} Konversationen konnten keinem Cluster zugeordnet werden (Noise)")
-                
+
+                if result.get("noise_count", 0) > 0:
+                    st.caption(
+                        f"ℹ️ {result['noise_count']} Konversationen konnten keinem Cluster zugeordnet werden (Noise)"
+                    )
+
                 # ===== SCATTER PLOT =====
                 st.markdown("### 🗺️ Themen-Landkarte (UMAP 2D)")
-                st.caption("Jeder Punkt ist eine Konversation. Ähnliche Themen liegen nah beieinander.")
-                
-                viz_data = result.get('visualization_data', {})
+                st.caption(
+                    "Jeder Punkt ist eine Konversation. Ähnliche Themen liegen nah beieinander."
+                )
+
+                viz_data = result.get("visualization_data", {})
                 if viz_data:
-                    scatter_df = pd.DataFrame({
-                        'x': viz_data['x'],
-                        'y': viz_data['y'],
-                        'cluster': viz_data['labels'],
-                        'text': viz_data['texts']
-                    })
+                    scatter_df = pd.DataFrame(
+                        {
+                            "x": viz_data["x"],
+                            "y": viz_data["y"],
+                            "cluster": viz_data["labels"],
+                            "text": viz_data["texts"],
+                        }
+                    )
                     # Map cluster IDs to names
-                    cluster_names = {cid: desc.get('name', f'Cluster {cid}') 
-                                    for cid, desc in result.get('cluster_descriptions', {}).items()}
-                    cluster_names[-1] = 'Nicht zugeordnet'
-                    scatter_df['cluster_name'] = scatter_df['cluster'].map(lambda x: cluster_names.get(x, f'Cluster {x}'))
-                    
+                    cluster_names = {
+                        cid: desc.get("name", f"Cluster {cid}")
+                        for cid, desc in result.get("cluster_descriptions", {}).items()
+                    }
+                    cluster_names[-1] = "Nicht zugeordnet"
+                    scatter_df["cluster_name"] = scatter_df["cluster"].map(
+                        lambda x: cluster_names.get(x, f"Cluster {x}")
+                    )
+
                     fig_scatter = px.scatter(
-                        scatter_df, x='x', y='y', color='cluster_name',
-                        hover_data={'text': True, 'x': False, 'y': False, 'cluster': False, 'cluster_name': False},
-                        title='Konversationen im semantischen Raum',
-                        labels={'cluster_name': 'Thema'},
-                        opacity=0.7
+                        scatter_df,
+                        x="x",
+                        y="y",
+                        color="cluster_name",
+                        hover_data={
+                            "text": True,
+                            "x": False,
+                            "y": False,
+                            "cluster": False,
+                            "cluster_name": False,
+                        },
+                        title="Konversationen im semantischen Raum",
+                        labels={"cluster_name": "Thema"},
+                        opacity=0.7,
                     )
                     fig_scatter.update_traces(marker=dict(size=6))
                     fig_scatter.update_layout(
-                        xaxis_title="", yaxis_title="",
-                        xaxis=dict(showticklabels=False), yaxis=dict(showticklabels=False),
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02)
+                        xaxis_title="",
+                        yaxis_title="",
+                        xaxis=dict(showticklabels=False),
+                        yaxis=dict(showticklabels=False),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02),
                     )
                     st.plotly_chart(fig_scatter, use_container_width=True)
-                
+
                 # ===== CLUSTER OVERVIEW =====
                 st.markdown("### 🏷️ Erkannte Themen")
-                
-                cluster_info = result.get('cluster_info', {})
-                cluster_descriptions = result.get('cluster_descriptions', {})
-                
+
+                cluster_info = result.get("cluster_info", {})
+                cluster_descriptions = result.get("cluster_descriptions", {})
+
                 # Sort clusters by size
                 sorted_clusters = sorted(
                     [(cid, info) for cid, info in cluster_info.items() if cid >= 0],
-                    key=lambda x: x[1]['size'],
-                    reverse=True
+                    key=lambda x: x[1]["size"],
+                    reverse=True,
                 )
-                
+
                 for cluster_id, info in sorted_clusters:
                     desc = cluster_descriptions.get(cluster_id, {})
-                    name = desc.get('name', f'Thema {cluster_id + 1}')
-                    description = desc.get('description', 'Keine Beschreibung verfügbar')
-                    sentiment = desc.get('sentiment', 'neutral')
-                    sentiment_icon = {"positiv": "😊", "negativ": "😞", "neutral": "😐"}.get(sentiment, "😐")
-                    
-                    with st.expander(f"**{name}** — {info['size']:,} Konversationen ({info['percentage']}%) {sentiment_icon}"):
+                    name = desc.get("name", f"Thema {cluster_id + 1}")
+                    description = desc.get(
+                        "description", "Keine Beschreibung verfügbar"
+                    )
+                    sentiment = desc.get("sentiment", "neutral")
+                    sentiment_icon = {
+                        "positiv": "😊",
+                        "negativ": "😞",
+                        "neutral": "😐",
+                    }.get(sentiment, "😐")
+
+                    with st.expander(
+                        f"**{name}** — {info['size']:,} Konversationen ({info['percentage']}%) {sentiment_icon}"
+                    ):
                         st.write(description)
-                        
-                        if info.get('keywords'):
-                            st.markdown(f"**Keywords:** `{'`, `'.join(info['keywords'][:8])}`")
-                        
-                        if info.get('examples'):
+
+                        if info.get("keywords"):
+                            st.markdown(
+                                f"**Keywords:** `{'`, `'.join(info['keywords'][:8])}`"
+                            )
+
+                        if info.get("examples"):
                             st.markdown("**Beispiele:**")
-                            for ex in info['examples'][:3]:
+                            for ex in info["examples"][:3]:
                                 st.markdown(f"- _{ex}_")
-                
+
                 # ===== BAR CHART =====
                 st.markdown("### 📊 Cluster-Größenverteilung")
-                bar_data = pd.DataFrame([
-                    {'Thema': cluster_descriptions.get(cid, {}).get('name', f'Cluster {cid}'), 
-                     'Anzahl': info['size'],
-                     'Prozent': info['percentage']}
-                    for cid, info in sorted_clusters
-                ])
+                bar_data = pd.DataFrame(
+                    [
+                        {
+                            "Thema": cluster_descriptions.get(cid, {}).get(
+                                "name", f"Cluster {cid}"
+                            ),
+                            "Anzahl": info["size"],
+                            "Prozent": info["percentage"],
+                        }
+                        for cid, info in sorted_clusters
+                    ]
+                )
                 if not bar_data.empty:
-                    fig_bar = px.bar(bar_data, x='Anzahl', y='Thema', orientation='h',
-                                     text='Prozent', title='Konversationen pro Thema')
-                    fig_bar.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
-                    fig_bar.update_layout(yaxis={'categoryorder': 'total ascending'})
+                    fig_bar = px.bar(
+                        bar_data,
+                        x="Anzahl",
+                        y="Thema",
+                        orientation="h",
+                        text="Prozent",
+                        title="Konversationen pro Thema",
+                    )
+                    fig_bar.update_traces(
+                        texttemplate="%{text:.1f}%", textposition="outside"
+                    )
+                    fig_bar.update_layout(yaxis={"categoryorder": "total ascending"})
                     st.plotly_chart(fig_bar, use_container_width=True)
-                
-                # Reset button
-                if st.button("🔄 Neue Embedding-Analyse starten"):
+
+                # Reset button (Cache leeren)
+                if st.button("🗑️ Analyse zurücksetzen"):
                     st.session_state.embedding_result = None
                     st.rerun()
-            
+
     st.divider()
-    
-    st.subheader("Word Cloud", help="Visuelle Darstellung der häufigsten Wörter. Je größer, desto öfter genannt.")
+
+    st.subheader(
+        "Word Cloud",
+        help="Visuelle Darstellung der häufigsten Wörter. Je größer, desto öfter genannt.",
+    )
     # We can't display matplotlib easily in some envs, but Streamlit supports it.
     from wordcloud import WordCloud
     import matplotlib.pyplot as plt
-    
+
     text = filtered_analyzer.get_wordcloud_text()
     if text:
-        wordcloud = WordCloud(width=800, height=400, background_color='black', 
-                              stopwords=filtered_analyzer.custom_stopwords).generate(text)
-        
+        wordcloud = WordCloud(
+            width=800,
+            height=400,
+            background_color="black",
+            stopwords=filtered_analyzer.custom_stopwords,
+        ).generate(text)
+
         fig, ax = plt.subplots(figsize=(10, 5))
-        ax.imshow(wordcloud, interpolation='bilinear')
+        ax.imshow(wordcloud, interpolation="bilinear")
         ax.axis("off")
         st.pyplot(fig)
     else:
         st.info("Nicht genügend Text für Wordcloud.")
 
     st.divider()
-    st.subheader("Exit-Analyse (Wie enden Gespräche?)", help="Zeigt, ob der Nutzer (offen?) oder der Bot (geklärt?) das letzte Wort hatte.")
-    
+    st.subheader(
+        "Exit-Analyse (Wie enden Gespräche?)",
+        help="Zeigt, ob der Nutzer (offen?) oder der Bot (geklärt?) das letzte Wort hatte.",
+    )
+
     exit_df = filtered_analyzer.get_exit_analysis()
-    
+
     # 1. Who sent the last message?
-    last_role_counts = exit_df['role'].value_counts().reset_index()
-    last_role_counts.columns = ['Role', 'Count']
-    fig_exit_role = px.pie(last_role_counts, values='Count', names='Role', 
-                          title='Wer hat die letzte Nachricht gesendet?',
-                          color='Role', color_discrete_map={'user': 'orange', 'assistant': 'blue'})
+    last_role_counts = exit_df["role"].value_counts().reset_index()
+    last_role_counts.columns = ["Role", "Count"]
+    fig_exit_role = px.pie(
+        last_role_counts,
+        values="Count",
+        names="Role",
+        title="Wer hat die letzte Nachricht gesendet?",
+        color="Role",
+        color_discrete_map={"user": "orange", "assistant": "blue"},
+    )
     st.plotly_chart(fig_exit_role, use_container_width=True)
-    
+
     # 2. Top last messages (if bot)
     st.markdown("**Häufigste letzte Antworten (Assistant):**")
-    bot_exits = exit_df[exit_df['role'] == 'assistant']['content'].value_counts().head(10).reset_index()
-    bot_exits.columns = ['Nachricht', 'Anzahl']
+    bot_exits = (
+        exit_df[exit_df["role"] == "assistant"]["content"]
+        .value_counts()
+        .head(10)
+        .reset_index()
+    )
+    bot_exits.columns = ["Nachricht", "Anzahl"]
     st.dataframe(bot_exits)
 
 with tab3:
-    st.header("Qualitäts-Analyse", help="Metriken zur Zufriedenheit und Komplexität der Anfragen.")
-    
+    st.header(
+        "Qualitäts-Analyse",
+        help="Metriken zur Zufriedenheit und Komplexität der Anfragen.",
+    )
+
     # Erfolgsrate
-    st.subheader("Erfolgsrate", help="Wurden die Nutzeranliegen gelöst? Basiert auf der letzten Nachricht jeder Konversation.")
-    
+    st.subheader(
+        "Erfolgsrate",
+        help="Wurden die Nutzeranliegen gelöst? Basiert auf der letzten Nachricht jeder Konversation.",
+    )
+
     success_data = filtered_analyzer.calculate_success_rate()
-    
+
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("✅ Erfolg", success_data['success_count'], 
-                help="User beendete mit positiven Keywords (danke, super, perfekt...)")
-    col2.metric("⚪ Neutral", success_data['neutral_count'], 
-                help="Normale Beendigung ohne eindeutige Signale.")
-    col3.metric("❌ Misserfolg", success_data['failure_count'], 
-                help="Bot konnte nicht helfen oder User war unzufrieden.")
-    col4.metric("📈 Erfolgsquote", f"{success_data['success_rate']}%", 
-                help="Anteil der erfolgreich abgeschlossenen Gespräche.")
-    
+    col1.metric(
+        "✅ Erfolg",
+        success_data["success_count"],
+        help="User beendete mit positiven Keywords (danke, super, perfekt...)",
+    )
+    col2.metric(
+        "⚪ Neutral",
+        success_data["neutral_count"],
+        help="Normale Beendigung ohne eindeutige Signale.",
+    )
+    col3.metric(
+        "❌ Misserfolg",
+        success_data["failure_count"],
+        help="Bot konnte nicht helfen oder User war unzufrieden.",
+    )
+    col4.metric(
+        "📈 Erfolgsquote",
+        f"{success_data['success_rate']}%",
+        help="Anteil der erfolgreich abgeschlossenen Gespräche.",
+    )
+
     # Pie Chart für Erfolgsrate
-    outcome_df = pd.DataFrame({
-        'Outcome': ['Erfolg', 'Neutral', 'Misserfolg'],
-        'Count': [success_data['success_count'], success_data['neutral_count'], success_data['failure_count']]
-    })
-    fig_success = px.pie(outcome_df, values='Count', names='Outcome', 
-                         title='Gesprächs-Outcomes',
-                         color='Outcome',
-                         color_discrete_map={'Erfolg': '#2ECC71', 'Neutral': '#95A5A6', 'Misserfolg': '#E74C3C'})
+    outcome_df = pd.DataFrame(
+        {
+            "Outcome": ["Erfolg", "Neutral", "Misserfolg"],
+            "Count": [
+                success_data["success_count"],
+                success_data["neutral_count"],
+                success_data["failure_count"],
+            ],
+        }
+    )
+    fig_success = px.pie(
+        outcome_df,
+        values="Count",
+        names="Outcome",
+        title="Gesprächs-Outcomes",
+        color="Outcome",
+        color_discrete_map={
+            "Erfolg": "#2ECC71",
+            "Neutral": "#95A5A6",
+            "Misserfolg": "#E74C3C",
+        },
+    )
     st.plotly_chart(fig_success, use_container_width=True)
-    
+
     st.divider()
-    
-    st.subheader("Sentiment-Analyse", help="Analysiert die Stimmung der User-Nachrichten anhand positiver/negativer Keywords und Emojis.")
-    
+
+    st.subheader(
+        "Sentiment-Analyse",
+        help="Analysiert die Stimmung der User-Nachrichten anhand positiver/negativer Keywords und Emojis.",
+    )
+
     # Session State für Sentiment
-    if 'sentiment_data' not in st.session_state:
+    if "sentiment_data" not in st.session_state:
         st.session_state.sentiment_data = None
-    
+
     # Toggle statt Button
-    run_sentiment = st.toggle("Sentiment-Analyse aktivieren", value=False, 
-                              help="Schalte ein, um die Stimmungsanalyse zu berechnen.")
-    
+    run_sentiment = st.toggle(
+        "Sentiment-Analyse aktivieren",
+        value=False,
+        help="Schalte ein, um die Stimmungsanalyse zu berechnen.",
+    )
+
     if run_sentiment:
         if st.session_state.sentiment_data is None:
             with st.spinner("Berechne Sentiment..."):
                 st.session_state.sentiment_data = filtered_analyzer.analyze_sentiment()
-        
+
         sentiment_df = st.session_state.sentiment_data
-        
+
         # Erklärung der Skala
-        st.markdown("""
+        st.markdown(
+            """
         **So funktioniert die Sentiment-Analyse:**
         - Wir suchen nach **positiven Wörtern** (z.B. "danke", "super", "toll", 👍, 😊)
         - Wir suchen nach **negativen Wörtern** (z.B. "problem", "fehler", "geht nicht", 😞, 😡)
         - **Score:** -1 = nur negativ, 0 = neutral/gemischt, +1 = nur positiv
-        """)
-        
+        """
+        )
+
         st.divider()
-        
+
         # Histogram mit Erklärung
         st.markdown("**📊 Grafik 1: Wie ist die Stimmung verteilt?**")
-        st.caption("Jeder Balken zeigt, wie viele Konversationen einen bestimmten Sentiment-Wert haben. Balken links = unzufrieden, Balken rechts = zufrieden, Balken in der Mitte = neutral.")
-        fig_hist = px.histogram(sentiment_df, x='sentiment', nbins=20, title='Sentiment-Verteilung')
-        fig_hist.update_layout(xaxis_title="Sentiment-Score (-1 bis +1)", yaxis_title="Anzahl Konversationen")
+        st.caption(
+            "Jeder Balken zeigt, wie viele Konversationen einen bestimmten Sentiment-Wert haben. Balken links = unzufrieden, Balken rechts = zufrieden, Balken in der Mitte = neutral."
+        )
+        fig_hist = px.histogram(
+            sentiment_df, x="sentiment", nbins=20, title="Sentiment-Verteilung"
+        )
+        fig_hist.update_layout(
+            xaxis_title="Sentiment-Score (-1 bis +1)",
+            yaxis_title="Anzahl Konversationen",
+        )
         st.plotly_chart(fig_hist, use_container_width=True)
-        
+
         st.divider()
-        
+
         # Scatter mit Erklärung
-        st.markdown("**📈 Grafik 2: Hängt die Gesprächsdauer mit der Stimmung zusammen?**")
-        st.caption("Jeder Punkt = eine Konversation. X-Achse = Dauer in Sekunden, Y-Achse = Sentiment. Muster erkennen: Sind lange Gespräche eher negativ?")
-        fig_scatter = px.scatter(sentiment_df, x='duration_seconds', y='sentiment', 
-                                 title='Gesprächsdauer vs. Stimmung', opacity=0.5)
-        fig_scatter.update_layout(xaxis_title="Dauer (Sekunden)", yaxis_title="Sentiment-Score")
+        st.markdown(
+            "**📈 Grafik 2: Hängt die Gesprächsdauer mit der Stimmung zusammen?**"
+        )
+        st.caption(
+            "Jeder Punkt = eine Konversation. X-Achse = Dauer in Sekunden, Y-Achse = Sentiment. Muster erkennen: Sind lange Gespräche eher negativ?"
+        )
+        fig_scatter = px.scatter(
+            sentiment_df,
+            x="duration_seconds",
+            y="sentiment",
+            title="Gesprächsdauer vs. Stimmung",
+            opacity=0.5,
+        )
+        fig_scatter.update_layout(
+            xaxis_title="Dauer (Sekunden)", yaxis_title="Sentiment-Score"
+        )
         st.plotly_chart(fig_scatter, use_container_width=True)
 
     st.divider()
-    st.subheader("Komplexitäts-Verteilung (Nachrichtenanzahl)", help="Zeigt, wie viele Chats kurz (Quick Fix) oder lang (komplex) sind.")
-    
+    st.subheader(
+        "Komplexitäts-Verteilung (Nachrichtenanzahl)",
+        help="Zeigt, wie viele Chats kurz (Quick Fix) oder lang (komplex) sind.",
+    )
+
     # Message Count Distribution
-    fig_msg_dist = px.histogram(filtered_conv_df, x='message_count', nbins=30, 
-                               title='Verteilung der Nachrichten pro Konversation',
-                               labels={'message_count': 'Anzahl Nachrichten'})
+    fig_msg_dist = px.histogram(
+        filtered_conv_df,
+        x="message_count",
+        nbins=30,
+        title="Verteilung der Nachrichten pro Konversation",
+        labels={"message_count": "Anzahl Nachrichten"},
+    )
     st.plotly_chart(fig_msg_dist, use_container_width=True)
-    
+
     # Classification (Short/Medium/Long)
     def classify_length(n):
-        if n <= 3: return "Kurz (1-3)"
-        if n <= 10: return "Mittel (4-10)"
+        if n <= 3:
+            return "Kurz (1-3)"
+        if n <= 10:
+            return "Mittel (4-10)"
         return "Lang (>10)"
-    
-    filtered_conv_df['length_class'] = filtered_conv_df['message_count'].apply(classify_length)
-    class_counts = filtered_conv_df['length_class'].value_counts().reset_index()
-    class_counts.columns = ['Klasse', 'Anzahl']
-    
-    fig_class = px.pie(class_counts, values='Anzahl', names='Klasse', title='Klassifizierung nach Länge')
+
+    filtered_conv_df["length_class"] = filtered_conv_df["message_count"].apply(
+        classify_length
+    )
+    class_counts = filtered_conv_df["length_class"].value_counts().reset_index()
+    class_counts.columns = ["Klasse", "Anzahl"]
+
+    fig_class = px.pie(
+        class_counts,
+        values="Anzahl",
+        names="Klasse",
+        title="Klassifizierung nach Länge",
+    )
     st.plotly_chart(fig_class, use_container_width=True)
 
     st.divider()
-    st.subheader("Bot-Hilflosigkeit", help="Wie oft signalisiert der Bot, dass er nicht helfen kann? (z.B. 'Ich weiß nicht', 'Support kontaktieren')")
-    
+    st.subheader(
+        "Bot-Hilflosigkeit",
+        help="Wie oft signalisiert der Bot, dass er nicht helfen kann? (z.B. 'Ich weiß nicht', 'Support kontaktieren')",
+    )
+
     helpless_data = filtered_analyzer.get_bot_helplessness()
-    
+
     col1, col2, col3 = st.columns(3)
-    col1.metric("Hilflose Antworten", helpless_data['helpless_count'], help="Anzahl der Bot-Antworten mit Hilflosigkeits-Keywords.")
-    col2.metric("Gesamt Bot-Nachrichten", helpless_data['total_bot_messages'], help="Gesamtzahl aller Bot-Antworten.")
-    col3.metric("Hilflosigkeits-Rate", f"{helpless_data['helpless_rate']}%", 
-                help="Prozentsatz der Bot-Antworten, die auf Wissenslücken hindeuten.")
-    
-    if not helpless_data['examples'].empty:
+    col1.metric(
+        "Hilflose Antworten",
+        helpless_data["helpless_count"],
+        help="Anzahl der Bot-Antworten mit Hilflosigkeits-Keywords.",
+    )
+    col2.metric(
+        "Gesamt Bot-Nachrichten",
+        helpless_data["total_bot_messages"],
+        help="Gesamtzahl aller Bot-Antworten.",
+    )
+    col3.metric(
+        "Hilflosigkeits-Rate",
+        f"{helpless_data['helpless_rate']}%",
+        help="Prozentsatz der Bot-Antworten, die auf Wissenslücken hindeuten.",
+    )
+
+    if not helpless_data["examples"].empty:
         st.markdown("**Top 5 'hilflose' Antworten:**")
-        st.dataframe(helpless_data['examples'])
-        
+        st.dataframe(helpless_data["examples"])
+
         # CSV Download für alle hilflosen Antworten
-        if not helpless_data['all_helpless'].empty:
-            csv = helpless_data['all_helpless'].to_csv(index=False).encode('utf-8')
+        if not helpless_data["all_helpless"].empty:
+            csv = helpless_data["all_helpless"].to_csv(index=False).encode("utf-8")
             st.download_button(
                 label="📥 Alle hilflosen Antworten als CSV herunterladen",
                 data=csv,
                 file_name="hilflose_antworten.csv",
                 mime="text/csv",
-                help="Lädt alle als 'hilflos' erkannten Bot-Antworten herunter."
+                help="Lädt alle als 'hilflos' erkannten Bot-Antworten herunter.",
             )
 
     st.divider()
-    st.subheader("Bot-Antwortlängen", help="Wie lang sind die Antworten des Bots im Durchschnitt? Zu kurz = nicht hilfreich, zu lang = verwirrend.")
-    
+    st.subheader(
+        "Bot-Antwortlängen",
+        help="Wie lang sind die Antworten des Bots im Durchschnitt? Zu kurz = nicht hilfreich, zu lang = verwirrend.",
+    )
+
     length_stats, length_df = filtered_analyzer.get_response_length_stats()
-    
+
     col1, col2 = st.columns(2)
-    col1.metric("Ø Zeichen pro Antwort", length_stats['avg_chars'], help="Durchschnittliche Zeichenanzahl pro Bot-Nachricht.")
-    col2.metric("Ø Wörter pro Antwort", length_stats['avg_words'], help="Durchschnittliche Wortanzahl pro Bot-Nachricht.")
-    
-    fig_length = px.histogram(length_df, x='word_count', nbins=30, 
-                             title='Verteilung der Antwortlänge (Wörter)',
-                             labels={'word_count': 'Wörter pro Antwort'})
+    col1.metric(
+        "Ø Zeichen pro Antwort",
+        length_stats["avg_chars"],
+        help="Durchschnittliche Zeichenanzahl pro Bot-Nachricht.",
+    )
+    col2.metric(
+        "Ø Wörter pro Antwort",
+        length_stats["avg_words"],
+        help="Durchschnittliche Wortanzahl pro Bot-Nachricht.",
+    )
+
+    fig_length = px.histogram(
+        length_df,
+        x="word_count",
+        nbins=30,
+        title="Verteilung der Antwortlänge (Wörter)",
+        labels={"word_count": "Wörter pro Antwort"},
+    )
     st.plotly_chart(fig_length, use_container_width=True)
 
 with tab4:
     st.header("Daten-Explorer", help="Durchsuche alle Nachrichten und Konversationen.")
-    search_term = st.text_input("Suche in Nachrichten", help="Gib ein Suchwort ein, um alle passenden Nachrichten zu finden.")
-    
+    search_term = st.text_input(
+        "Suche in Nachrichten",
+        help="Gib ein Suchwort ein, um alle passenden Nachrichten zu finden.",
+    )
+
     if search_term:
-        results = filtered_msg_df[filtered_msg_df['content'].str.contains(search_term, case=False, na=False)]
+        results = filtered_msg_df[
+            filtered_msg_df["content"].str.contains(search_term, case=False, na=False)
+        ]
         st.write(f"{len(results)} Treffer gefunden:")
-        st.dataframe(results[['conversation_id', 'role', 'content']])
+        st.dataframe(results[["conversation_id", "role", "content"]])
     else:
         st.subheader("Konversationen")
         st.dataframe(filtered_conv_df)

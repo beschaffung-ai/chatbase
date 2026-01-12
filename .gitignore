@@ -25,6 +25,8 @@ ENV/
 
 # Streamlit
 .streamlit/secrets.toml
+.streamlit/user_cache/
+.streamlit/active_sessions.json
 
 # Temp files
 temp_upload.csv
