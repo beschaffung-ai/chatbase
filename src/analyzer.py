@@ -1049,7 +1049,7 @@ Antworte NUR im JSON-Format:
                 "is_noise": True,
             }
 
-        # ===== GPT CLUSTER NAMING =====
+        # ===== GPT CLUSTER NAMING (BATCH - UNIQUE NAMES) =====
         if progress_callback:
             progress_callback(0.85, "GPT Cluster-Beschreibungen...")
 
@@ -1060,40 +1060,81 @@ Antworte NUR im JSON-Format:
             c for c in unique_clusters if cluster_info[c]["size"] >= 5
         ][:15]
 
+        # Prepare all clusters for batch processing
+        all_clusters_for_gpt = []
         for cluster_id in clusters_to_describe:
             info = cluster_info[cluster_id]
-            keywords_str = ", ".join(info["keywords"][:8])
-            examples_str = "\n".join([f"- {ex}" for ex in info["examples"]])
+            all_clusters_for_gpt.append({
+                "id": int(cluster_id),
+                "keywords": info["keywords"][:8],
+                "examples": info["examples"][:3],
+                "size": info["size"]
+            })
 
-            try:
-                response = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": f"""Analysiere diese Cluster-Daten und gib einen passenden deutschen Namen und eine kurze Beschreibung.
+        try:
+            # Send ALL clusters in ONE request for unique naming
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": """Du bist ein Experte für Themenanalyse von Kundenanfragen.
+Deine Aufgabe ist es, Cluster von Kundenanfragen zu benennen.
+WICHTIG: Jeder Cluster muss einen EINZIGARTIGEN Namen bekommen - keine Duplikate!
+Wenn mehrere Cluster ähnliche Themen haben, differenziere sie durch spezifischere Beschreibungen."""
+                    },
+                    {
+                        "role": "user",
+                        "content": f"""Analysiere diese {len(all_clusters_for_gpt)} Cluster von Kundenanfragen und gib jedem einen EINDEUTIGEN deutschen Namen.
 
-Keywords: {keywords_str}
+CLUSTER-DATEN:
+{json.dumps(all_clusters_for_gpt, ensure_ascii=False, indent=2)}
 
-Beispiel-Anfragen:
-{examples_str}
+REGELN:
+1. Jeder Name muss EINZIGARTIG sein - KEINE DUPLIKATE erlaubt!
+2. Wenn Cluster ähnlich sind, differenziere durch Details (z.B. "Kontoeröffnung - Dokumente", "Kontoeröffnung - Ablauf", "Kontoeröffnung - Dauer")
+3. Namen sollten 2-5 Wörter haben
+4. Beschreibung 1-2 Sätze
 
-Antworte im JSON-Format:
-{{"name": "Kurzer Themenname (2-4 Wörter)", "description": "Eine Beschreibung in 1-2 Sätzen was Kunden hier fragen", "sentiment": "positiv/neutral/negativ"}}""",
-                        }
-                    ],
-                    response_format={"type": "json_object"},
-                    max_tokens=150,
-                    temperature=0.3,
-                )
+Antworte mit einem JSON-Objekt mit "clusters" Array:
+{{"clusters": [{{"id": 0, "name": "Eindeutiger Name", "description": "Beschreibung", "sentiment": "positiv/neutral/negativ"}}]}}"""
+                    }
+                ],
+                response_format={"type": "json_object"},
+                max_tokens=2000,
+                temperature=0.3,
+            )
 
-                desc = json.loads(response.choices[0].message.content)
-                cluster_descriptions[cluster_id] = desc
+            result = json.loads(response.choices[0].message.content)
+            
+            # Map results back to cluster_descriptions
+            for cluster_data in result.get("clusters", []):
+                cluster_id = cluster_data.get("id")
+                if cluster_id is not None:
+                    cluster_descriptions[cluster_id] = {
+                        "name": cluster_data.get("name", f"Thema {cluster_id + 1}"),
+                        "description": cluster_data.get("description", ""),
+                        "sentiment": cluster_data.get("sentiment", "neutral")
+                    }
+            
+            # Ensure all clusters have descriptions
+            for cluster_id in clusters_to_describe:
+                if cluster_id not in cluster_descriptions:
+                    info = cluster_info[cluster_id]
+                    cluster_descriptions[cluster_id] = {
+                        "name": f"Thema {cluster_id + 1}",
+                        "description": f"Keywords: {', '.join(info['keywords'][:5])}",
+                        "sentiment": "neutral"
+                    }
 
-            except Exception as e:
+        except Exception as e:
+            # Fallback: Use keywords as names if GPT fails
+            for cluster_id in clusters_to_describe:
+                info = cluster_info[cluster_id]
+                keywords_str = ", ".join(info["keywords"][:3])
                 cluster_descriptions[cluster_id] = {
-                    "name": f"Thema {cluster_id + 1}",
-                    "description": f"Cluster mit Keywords: {keywords_str}",
+                    "name": f"Thema: {keywords_str}",
+                    "description": f"Cluster mit {info['size']} Konversationen",
                     "sentiment": "neutral",
                 }
 

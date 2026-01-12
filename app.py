@@ -953,7 +953,7 @@ with tab1:
     col3.metric(
         "Ø Dauer (sek)",
         stats["avg_duration_seconds"],
-        help="Durchschnittliche Zeit zwischen erster und letzter Nachricht.",
+        help="Berechnung: (Zeitstempel letzte Nachricht - Zeitstempel erste Nachricht) pro Konversation, dann Durchschnitt. Zeigt, wie lange Nutzer typischerweise im Chat bleiben.",
     )
     col4.metric(
         "Ø Msgs/Conv",
@@ -992,7 +992,18 @@ with tab1:
     # Heatmap (Weekday x Hour)
     st.subheader(
         "Support-Auslastung (Heatmap)",
-        help="Dunkle Felder zeigen Zeiten mit hoher Aktivität. Ideal für die Personalplanung.",
+        help="""**Was zeigt die Heatmap?**
+
+Kombiniert Wochentag (Y-Achse) und Uhrzeit (X-Achse) zu einer Matrix:
+
+🟡 **Gelb:** Wenig Aktivität (< 10 Gespräche)
+🟠 **Orange:** Mittlere Aktivität
+🔴 **Rot/Dunkel:** Hohe Aktivität (Peak-Zeiten)
+
+**Nutzen:** 
+- Personalplanung: Wann werden die meisten Mitarbeiter gebraucht?
+- Bot-Optimierung: Zu welchen Zeiten sollte der Bot am besten funktionieren?
+- Erreichbarkeit: Wann sind die Kunden am aktivsten?""",
     )
     heatmap_data = filtered_analyzer.get_heatmap_data()
     if not heatmap_data.empty:
@@ -1015,7 +1026,7 @@ with tab1:
         and filtered_conv_df["source"].nunique() > 1
     ):
         st.subheader(
-            "Quellen", help="Woher kommen die Konversationen? (z.B. Widget, API, etc.)"
+            "Quellen", help="Zeigt die Herkunft der Konversationen. 'Widget or Iframe' = Chatbot auf der Website eingebettet. Andere Quellen könnten API-Aufrufe oder direkte Zugriffe sein."
         )
         source_counts = filtered_conv_df["source"].value_counts().reset_index()
         source_counts.columns = ["source", "count"]
@@ -1036,7 +1047,14 @@ with tab2:
     # Keyword Trends über Zeit
     st.subheader(
         "Themen-Trend über Zeit",
-        help="Zeigt, welche Keywords pro Woche/Monat am häufigsten genannt werden. Ideal um Trends und saisonale Themen zu erkennen.",
+        help="""**Wie werden Keyword-Trends berechnet?**
+
+1. Alle User-Nachrichten werden nach Zeitraum gruppiert (Woche/Monat)
+2. Stoppwörter (der, die, das, und...) werden entfernt
+3. Die häufigsten Wörter pro Periode werden gezählt
+4. Über Zeit als Liniendiagramm dargestellt
+
+**Nutzen:** Erkennt saisonale Themen (z.B. "Steuererklärung" im März) und neue aufkommende Probleme.""",
     )
 
     trend_freq = st.radio(
@@ -1081,7 +1099,14 @@ with tab2:
     # Erste Fragen Analyse
     st.subheader(
         "Häufigste Einstiegsfragen",
-        help="Womit starten die Nutzer das Gespräch? Zeigt die Hauptanliegen.",
+        help="""**Was sind Einstiegsfragen?**
+
+Die ERSTE User-Nachricht jeder Konversation (nach der Bot-Begrüßung).
+
+**Nutzen:**
+- 📋 FAQ-Inhalte priorisieren: Die häufigsten Fragen sollten im Bot gut beantwortet sein
+- 👋 Bot-Begrüßung optimieren: Wenn viele gleich fragen, proaktiv Info anbieten
+- 🎯 Hauptbedürfnisse verstehen: Zeigt, warum Nutzer den Chat starten""",
     )
     first_questions = filtered_analyzer.get_first_questions(top_k=10)
     if not first_questions.empty:
@@ -1104,7 +1129,7 @@ with tab2:
     with col1:
         st.subheader(
             "Häufigste Phrasen (Bigrams)",
-            help="Häufige Wortpaare (z.B. 'Konto eröffnen').",
+            help="**Bigrams** = Zwei aufeinanderfolgende Wörter. Zeigt häufige Kombinationen wie 'Konto eröffnen', 'wie lange', 'vielen Dank'. Nützlicher als Einzelwörter für Kontextverständnis.",
         )
         top_phrases = filtered_analyzer.get_top_phrases(n_gram_range=(2, 2), top_k=10)
         if top_phrases:
@@ -1124,7 +1149,7 @@ with tab2:
     with col2:
         st.subheader(
             "Häufigste Phrasen (Trigrams)",
-            help="Häufige Wort-Trios (z.B. 'wie viel kostet').",
+            help="**Trigrams** = Drei aufeinanderfolgende Wörter. Zeigt vollständigere Phrasen wie 'wie viel kostet', 'kann ich auch', 'gibt es eine'. Ideal um konkrete Fragestellungen zu erkennen.",
         )
         top_trigrams = filtered_analyzer.get_top_phrases(n_gram_range=(3, 3), top_k=10)
         if top_trigrams:
@@ -1140,7 +1165,17 @@ with tab2:
     st.divider()
 
     st.subheader(
-        "Topic Clustering", help="Gruppiert Gespräche automatisch in Themencluster."
+        "Topic Clustering", help="""**Was ist Topic Clustering?**
+
+Automatische Gruppierung von Konversationen nach Themen.
+
+**Wie funktioniert es?**
+1. Alle User-Nachrichten einer Konversation werden zusammengefasst
+2. Der Text wird in numerische Vektoren umgewandelt
+3. Ähnliche Vektoren werden zu Clustern gruppiert
+4. Jeder Cluster = ein Thema
+
+**Nutzen:** Zeigt die häufigsten Kundenanliegen ohne manuelles Lesen aller Chats."""
     )
 
     # Auswahl der Methode
@@ -1148,7 +1183,16 @@ with tab2:
         "Clustering-Methode:",
         ["K-Means (Lokal, kostenlos)", "🧠 Embedding (Alle Daten, empfohlen)"],
         horizontal=True,
-        help="K-Means: kostenlos, schnell, weniger genau | Embedding: ALLE Daten mit OpenAI Embeddings + GPT (~$0.07)",
+        help="""**K-Means (Lokal):** 
+- ✅ Kostenlos, schnell
+- ❌ Basiert nur auf Wort-Häufigkeiten (TF-IDF), versteht keine Bedeutung
+- ❌ Anzahl Cluster muss vorgegeben werden (Standard: 5)
+
+**Embedding (OpenAI):**
+- ✅ Analysiert ALLE Konversationen (100% Abdeckung)
+- ✅ Versteht semantische Bedeutung ("Konto eröffnen" ≈ "neues Konto anlegen")
+- ✅ Findet automatisch optimale Cluster-Anzahl (HDBSCAN)
+- ⚡ Kosten: ~$0.05-0.10 pro Analyse""",
     )
 
     if clustering_method == "K-Means (Lokal, kostenlos)":
@@ -1159,7 +1203,7 @@ with tab2:
         run_clustering = st.toggle(
             "K-Means Clustering aktivieren",
             value=False,
-            help="Schalte ein, um die Themen-Analyse zu starten.",
+            help="Startet die lokale K-Means Analyse. Verwendet TF-IDF (Term Frequency - Inverse Document Frequency) um Wort-Wichtigkeit zu berechnen, dann K-Means um 5 Cluster zu bilden.",
         )
 
         if run_clustering:
@@ -1216,7 +1260,13 @@ with tab2:
             use_hdbscan = st.checkbox(
                 "HDBSCAN (automatische Cluster-Anzahl)",
                 value=True,
-                help="HDBSCAN findet automatisch die optimale Anzahl an Clustern.",
+                help="""**HDBSCAN (Hierarchical Density-Based Clustering)**
+
+✅ Findet automatisch die optimale Anzahl an Clustern
+✅ Erkennt Ausreißer/Noise (nicht zuordenbare Chats)
+✅ Bildet Cluster unterschiedlicher Größe
+
+Wenn deaktiviert: K-Means mit fester Cluster-Anzahl (weniger flexibel).""",
             )
 
         # Parameter-Bereich
@@ -1244,7 +1294,13 @@ with tab2:
                 min_value=5,
                 max_value=max_slider_val,
                 value=default_val,
-                help="Wie viele Konversationen muss ein Thema mindestens haben? Kleiner = mehr Nischenthemen, Größer = nur Hauptthemen.",
+                help="""**Minimale Anzahl Konversationen pro Cluster**
+
+🔍 **Kleiner Wert (5-15):** Findet auch Nischen-Themen mit wenigen Anfragen
+📊 **Mittlerer Wert (15-50):** Balance zwischen Detail und Übersicht
+📈 **Großer Wert (50+):** Nur große Hauptthemen, viele Chats als 'Noise'
+
+**Empfehlung:** 1-5% deiner Gesamtdaten (wird automatisch berechnet).""",
             )
 
             # Feedback zur Cluster-Größe
@@ -1269,7 +1325,13 @@ with tab2:
                 max_value=0.5,
                 value=0.0,
                 step=0.1,
-                help="0.0 = Strikte Trennung von Themen. Höhere Werte (z.B. 0.3) fassen ähnliche Themen eher zusammen.",
+                help="""**Epsilon = Minimale Distanz zwischen Clustern**
+
+🎯 **0.0 (Standard):** Strikte Trennung - nur sehr ähnliche Chats werden gruppiert
+🔗 **0.1-0.2:** Moderat - auch etwas ähnliche Themen werden zusammengefasst
+🔀 **0.3-0.5:** Locker - viele Themen werden vereint (weniger, größere Cluster)
+
+**Beispiel:** Bei 0.0 könnten "Kontoeröffnung Privatkunde" und "Kontoeröffnung Firmenkunde" getrennt sein. Bei 0.3 würden sie zu "Kontoeröffnung" verschmelzen.""",
             )
 
         # Start Button statt Toggle
@@ -1476,7 +1538,14 @@ with tab2:
 
     st.subheader(
         "Word Cloud",
-        help="Visuelle Darstellung der häufigsten Wörter. Je größer, desto öfter genannt.",
+        help="""**Wie wird die WordCloud erstellt?**
+
+1. Alle User-Nachrichten werden zusammengefasst
+2. Deutsche Stoppwörter werden entfernt (der, die, das, und, ist...)
+3. Wörter werden nach Häufigkeit gewichtet
+4. Häufigere Wörter = größere Darstellung
+
+**Nutzen:** Schneller visueller Überblick über die Hauptthemen. Große Wörter = häufig gestellte Fragen/Themen.""",
     )
     # We can't display matplotlib easily in some envs, but Streamlit supports it.
     from wordcloud import WordCloud
@@ -1501,7 +1570,17 @@ with tab2:
     st.divider()
     st.subheader(
         "Exit-Analyse (Wie enden Gespräche?)",
-        help="Zeigt, ob der Nutzer (offen?) oder der Bot (geklärt?) das letzte Wort hatte.",
+        help="""**Wer hat das letzte Wort?**
+
+👤 **User:** Die Konversation endete mit einer User-Nachricht
+→ Möglicherweise offene Frage, User hat aufgegeben, oder einfach "Danke"
+
+🤖 **Assistant:** Die Konversation endete mit einer Bot-Nachricht
+→ Bot hat geantwortet, User hat nicht weiter nachgefragt (evtl. zufrieden)
+
+**Interpretation:** 
+- Hoher User-Anteil: Könnte auf unbeantwortete Fragen hindeuten
+- Hoher Bot-Anteil: Bot beendet Gespräche aktiv (gut oder schlecht?)""",
     )
 
     exit_df = filtered_analyzer.get_exit_analysis()
@@ -1539,7 +1618,18 @@ with tab3:
     # Erfolgsrate
     st.subheader(
         "Erfolgsrate",
-        help="Wurden die Nutzeranliegen gelöst? Basiert auf der letzten Nachricht jeder Konversation.",
+        help="""**Wie wird die Erfolgsrate ermittelt?**
+        
+Die LETZTE Nachricht jeder Konversation wird analysiert:
+
+✅ **Erfolg** = User endet mit positiven Keywords:
+'danke', 'super', 'perfekt', 'toll', 'funktioniert', 'geklappt', 'hilfreich', 'top', '👍', '😊', '✅' u.a.
+
+❌ **Misserfolg** = Bot endet hilflos ODER User endet negativ:
+Bot: 'weiß ich nicht', 'support kontaktieren', 'leider nicht möglich'
+User: 'hilft nicht', 'funktioniert nicht', 'enttäuscht', '👎', '😠' u.a.
+
+⚪ **Neutral** = Keine eindeutigen Keywords erkannt.""",
     )
 
     success_data = filtered_analyzer.calculate_success_rate()
@@ -1548,22 +1638,22 @@ with tab3:
     col1.metric(
         "✅ Erfolg",
         success_data["success_count"],
-        help="User beendete mit positiven Keywords (danke, super, perfekt...)",
+        help="Konversationen, bei denen der User mit positiven Wörtern/Emojis endete: 'danke', 'super', 'perfekt', 'toll', 'hilfreich', '👍', '😊' etc.",
     )
     col2.metric(
         "⚪ Neutral",
         success_data["neutral_count"],
-        help="Normale Beendigung ohne eindeutige Signale.",
+        help="Konversationen ohne eindeutige positive oder negative Signale in der letzten Nachricht.",
     )
     col3.metric(
         "❌ Misserfolg",
         success_data["failure_count"],
-        help="Bot konnte nicht helfen oder User war unzufrieden.",
+        help="Bot konnte nicht helfen ('support kontaktieren', 'weiß ich nicht') ODER User endete unzufrieden ('hilft nicht', 'funktioniert nicht', '👎').",
     )
     col4.metric(
         "📈 Erfolgsquote",
         f"{success_data['success_rate']}%",
-        help="Anteil der erfolgreich abgeschlossenen Gespräche.",
+        help="Berechnung: Erfolg / (Erfolg + Neutral + Misserfolg) × 100. Zeigt den Anteil der zufrieden abgeschlossenen Gespräche.",
     )
 
     # Pie Chart für Erfolgsrate
@@ -1595,7 +1685,19 @@ with tab3:
 
     st.subheader(
         "Sentiment-Analyse",
-        help="Analysiert die Stimmung der User-Nachrichten anhand positiver/negativer Keywords und Emojis.",
+        help="""**Wie wird der Sentiment-Score berechnet?**
+
+Jede User-Nachricht wird auf positive und negative Wörter/Emojis gescannt:
+
+👍 **Positiv** (+1): 'danke', 'super', 'toll', 'perfekt', 'genial', 'top', 'gut', '😊', '😄', '❤️', '👍' u.a.
+
+👎 **Negativ** (-1): 'schlecht', 'problem', 'fehler', 'ärgerlich', 'frustrierend', 'enttäuscht', 'kompliziert', '😞', '😠', '👎' u.a.
+
+**Score** = (Anzahl positiv - Anzahl negativ) / Gesamt
+→ Ergebnis: -1 (sehr negativ) bis +1 (sehr positiv)
+→ 0 = neutral oder keine Keywords gefunden
+
+Pro Konversation wird der Durchschnitt aller User-Nachrichten berechnet.""",
     )
 
     # Session State für Sentiment
@@ -1606,7 +1708,7 @@ with tab3:
     run_sentiment = st.toggle(
         "Sentiment-Analyse aktivieren",
         value=False,
-        help="Schalte ein, um die Stimmungsanalyse zu berechnen.",
+        help="Aktiviert die keyword-basierte Stimmungsanalyse aller User-Nachrichten. Berechnet einen Score von -1 (negativ) bis +1 (positiv).",
     )
 
     if run_sentiment:
@@ -1666,7 +1768,15 @@ with tab3:
     st.divider()
     st.subheader(
         "Komplexitäts-Verteilung (Nachrichtenanzahl)",
-        help="Zeigt, wie viele Chats kurz (Quick Fix) oder lang (komplex) sind.",
+        help="""**Was zeigt diese Analyse?**
+
+Jede Konversation wird nach Anzahl der Nachrichten klassifiziert:
+
+📗 **Kurz (1-3 Nachrichten):** Schnelle Fragen, One-Liner, einfache Anliegen
+📙 **Mittel (4-10 Nachrichten):** Typische Support-Gespräche
+📕 **Lang (>10 Nachrichten):** Komplexe Probleme, viel Hin und Her
+
+**Nutzen:** Zeigt, ob der Bot effizient antwortet oder ob Nutzer viele Nachfragen stellen müssen.""",
     )
 
     # Message Count Distribution
@@ -1704,7 +1814,19 @@ with tab3:
     st.divider()
     st.subheader(
         "Bot-Hilflosigkeit",
-        help="Wie oft signalisiert der Bot, dass er nicht helfen kann? (z.B. 'Ich weiß nicht', 'Support kontaktieren')",
+        help="""**Wie werden "hilflose" Antworten erkannt?**
+
+Jede Bot-Nachricht wird auf folgende Keywords gescannt:
+
+🔍 **Hilflosigkeits-Keywords:**
+'weiß ich nicht', 'kann ich nicht', 'keine information', 
+'support kontaktieren', 'kundenservice', 'rufen sie an', 
+'leider nicht', 'tut mir leid', 'nicht möglich', 
+'wende dich an', 'kontaktiere', 'hilfe vom team'
+
+Wenn mindestens EIN Keyword gefunden wird, gilt die Antwort als "hilflos".
+
+**Nutzen:** Identifiziert Wissenslücken im Bot-Training und zeigt, wo nachgebessert werden sollte.""",
     )
 
     helpless_data = filtered_analyzer.get_bot_helplessness()
@@ -1713,17 +1835,17 @@ with tab3:
     col1.metric(
         "Hilflose Antworten",
         helpless_data["helpless_count"],
-        help="Anzahl der Bot-Antworten mit Hilflosigkeits-Keywords.",
+        help="Anzahl der Bot-Nachrichten, die mindestens ein Hilflosigkeits-Keyword enthalten ('weiß ich nicht', 'support kontaktieren' etc.).",
     )
     col2.metric(
         "Gesamt Bot-Nachrichten",
         helpless_data["total_bot_messages"],
-        help="Gesamtzahl aller Bot-Antworten.",
+        help="Gesamtzahl aller vom Bot gesendeten Nachrichten im gewählten Zeitraum.",
     )
     col3.metric(
         "Hilflosigkeits-Rate",
         f"{helpless_data['helpless_rate']}%",
-        help="Prozentsatz der Bot-Antworten, die auf Wissenslücken hindeuten.",
+        help="Berechnung: (Hilflose Antworten / Gesamt Bot-Nachrichten) × 100. Zeigt, wie oft der Bot nicht weiterhelfen konnte.",
     )
 
     if not helpless_data["examples"].empty:
@@ -1744,7 +1866,13 @@ with tab3:
     st.divider()
     st.subheader(
         "Bot-Antwortlängen",
-        help="Wie lang sind die Antworten des Bots im Durchschnitt? Zu kurz = nicht hilfreich, zu lang = verwirrend.",
+        help="""**Warum ist Antwortlänge wichtig?**
+
+📏 **Zu kurz (< 50 Zeichen):** Möglicherweise nicht ausreichend hilfreich
+📐 **Optimal (50-500 Zeichen):** Prägnant und informativ
+📜 **Zu lang (> 500 Zeichen):** Kann überfordern oder unübersichtlich sein
+
+**Berechnung:** Für jede Bot-Nachricht werden Zeichen und Wörter gezählt, dann der Durchschnitt gebildet.""",
     )
 
     length_stats, length_df = filtered_analyzer.get_response_length_stats()
@@ -1753,12 +1881,12 @@ with tab3:
     col1.metric(
         "Ø Zeichen pro Antwort",
         length_stats["avg_chars"],
-        help="Durchschnittliche Zeichenanzahl pro Bot-Nachricht.",
+        help="Durchschnitt aller Bot-Nachrichten: Gesamtzeichen ÷ Anzahl Nachrichten. Inkl. Leerzeichen, Satzzeichen, Emojis.",
     )
     col2.metric(
         "Ø Wörter pro Antwort",
         length_stats["avg_words"],
-        help="Durchschnittliche Wortanzahl pro Bot-Nachricht.",
+        help="Durchschnitt aller Bot-Nachrichten: Gesamtwörter ÷ Anzahl Nachrichten. Wörter werden durch Leerzeichen getrennt.",
     )
 
     fig_length = px.histogram(
@@ -1771,7 +1899,7 @@ with tab3:
     st.plotly_chart(fig_length, use_container_width=True)
 
 with tab4:
-    st.header("Daten-Explorer", help="Durchsuche alle Nachrichten und Konversationen.")
+    st.header("Daten-Explorer", help="Direkte Suche in allen Rohdaten. Durchsuche Nachrichten nach Stichworten, sehe alle Konversations-Metadaten (Datum, Dauer, Nachrichtenanzahl) und einzelne Nachrichten.")
     search_term = st.text_input(
         "Suche in Nachrichten",
         help="Gib ein Suchwort ein, um alle passenden Nachrichten zu finden.",
